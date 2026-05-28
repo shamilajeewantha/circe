@@ -1,0 +1,16 @@
+# Analysis output files — contain raw captured traffic and personal phone data
+capture_analysis.txt
+drone_packets.txt
+
+# Packet captures — contain raw WiFi traffic, potentially sensitive
+*.pcap
+*.pcapng
+*.pcap.gz
+
+# Throwaway scripts used during protocol discovery
+port_probe.py
+tcp_scan.py
+discover.py
+parse_pcap.py
+analyze_capture.py
+dump_drone_packets.py
