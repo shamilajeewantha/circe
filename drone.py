@@ -148,27 +148,35 @@ class Drone:
     # ── movements (duration in seconds) ──────────────────────────────────────
 
     def up(self, duration=1.0, power=180):
+        print(f"[>] Up        duration={duration}s  throttle={power}")
         self.set_controls(throttle=power); time.sleep(duration); self.hover()
 
     def down(self, duration=1.0, power=80):
+        print(f"[>] Down      duration={duration}s  throttle={power}")
         self.set_controls(throttle=power); time.sleep(duration); self.hover()
 
     def forward(self, duration=1.0, power=160):
+        print(f"[>] Forward   duration={duration}s  pitch={power}")
         self.set_controls(pitch=power); time.sleep(duration); self.hover()
 
     def backward(self, duration=1.0, power=96):
+        print(f"[>] Backward  duration={duration}s  pitch={power}")
         self.set_controls(pitch=power); time.sleep(duration); self.hover()
 
     def turn_left(self, duration=1.0, power=63):
+        print(f"[>] Turn left  duration={duration}s  yaw={power}")
         self.set_controls(yaw=power); time.sleep(duration); self.hover()
 
     def turn_right(self, duration=1.0, power=191):
+        print(f"[>] Turn right duration={duration}s  yaw={power}")
         self.set_controls(yaw=power); time.sleep(duration); self.hover()
 
     def move_left(self, duration=1.0, power=96):
+        print(f"[>] Move left  duration={duration}s  roll={power}")
         self.set_controls(roll=power); time.sleep(duration); self.hover()
 
     def move_right(self, duration=1.0, power=160):
+        print(f"[>] Move right duration={duration}s  roll={power}")
         self.set_controls(roll=power); time.sleep(duration); self.hover()
 
 
@@ -180,14 +188,73 @@ if __name__ == "__main__":
     try:
         print("[*] Arming (3s)...")
         time.sleep(3)
+
+        print("[*] Calibrating gyro...")
+        drone.calibrate()
+        time.sleep(1)
+
+        print("[*] Taking off...")
         drone.takeoff()
-        time.sleep(4)
+        time.sleep(3)
+
+        print("[>] Hover 2s")
+        drone.hover()
+        time.sleep(2)
+
+        drone.up(duration=1.5)
+
+        print("[>] Hover 1s")
+        drone.hover()
+        time.sleep(1)
+
+        drone.down(duration=1.5)
+
+        print("[>] Hover 1s")
+        drone.hover()
+        time.sleep(1)
+
+        drone.forward(duration=1.5)
+
+        print("[>] Hover 1s")
+        drone.hover()
+        time.sleep(1)
+
+        drone.backward(duration=1.5)
+
+        print("[>] Hover 1s")
+        drone.hover()
+        time.sleep(1)
+
+        drone.move_left(duration=1.0)
+
+        print("[>] Hover 1s")
+        drone.hover()
+        time.sleep(1)
+
+        drone.move_right(duration=1.0)
+
+        print("[>] Hover 1s")
+        drone.hover()
+        time.sleep(1)
+
+        drone.turn_left(duration=1.0)
+
+        print("[>] Hover 1s")
+        drone.hover()
+        time.sleep(1)
+
+        drone.turn_right(duration=1.0)
+
+        print("[>] Hover 3s before landing...")
         drone.hover()
         time.sleep(3)
+
+        print("[*] Landing...")
         drone.land()
         time.sleep(2)
+
     except KeyboardInterrupt:
-        print("\n[!] Interrupted")
+        print("\n[!] Interrupted — landing")
         drone.land()
         time.sleep(2)
     finally:
