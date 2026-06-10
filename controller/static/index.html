@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drone &amp; Rover Controller</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+    padding: 16px;
+  }
+
+  h1 {
+    text-align: center;
+    font-size: 1.3rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #7eb8f7;
+    margin-bottom: 16px;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    grid-template-rows: auto auto;
+    gap: 16px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  /* Left column spans both rows */
+  .left-col {
+    grid-row: 1 / 3;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .panel {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 10px;
+    padding: 16px;
+  }
+
+  .panel-title {
+    font-size: 0.75rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #7eb8f7;
+    margin-bottom: 14px;
+  }
+
+  /* D-pad layout */
+  .dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 52px);
+    grid-template-rows: repeat(3, 52px);
+    gap: 4px;
+    justify-content: center;
+    margin-bottom: 10px;
+  }
+
+  .dpad .spacer { visibility: hidden; }
+
+  .btn {
+    background: #0f3460;
+    border: 1px solid #1a6ba8;
+    border-radius: 6px;
+    color: #d0e8ff;
+    cursor: pointer;
+    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    transition: background 0.1s, transform 0.05s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .btn:hover   { background: #1a6ba8; }
+  .btn:active  { background: #2196f3; transform: scale(0.95); }
+  .btn.pressed { background: #2196f3; transform: scale(0.95); }
+
+  /* Extra drone buttons row */
+  .row {
+    display: flex;
+    gap: 6px;
+    justify-content: center;
+    margin-bottom: 8px;
+  }
+
+  .row .btn { width: 80px; height: 40px; font-size: 13px; }
+  .row .btn.wide { width: 120px; }
+
+  /* Step selector */
+  .step-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: #8899aa;
+  }
+
+  select {
+    background: #0f3460;
+    border: 1px solid #1a6ba8;
+    border-radius: 4px;
+    color: #d0e8ff;
+    padding: 3px 6px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  /* Arm button */
+  .btn-arm {
+    width: 100%;
+    height: 38px;
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-top: 4px;
+    background: #1a3d1a;
+    border-color: #2e7d32;
+    color: #a5d6a7;
+  }
+  .btn-arm:hover  { background: #2e7d32; }
+  .btn-arm.armed  { background: #2e7d32; border-color: #66bb6a; color: #fff; }
+
+  /* Brake button */
+  .btn-brake {
+    width: 100%;
+    height: 44px;
+    font-size: 13px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+  .btn-brake.braked   { background: #7f1d1d; border-color: #ef5350; color: #ffcdd2; }
+  .btn-brake.braked:hover { background: #c62828; }
+  .btn-brake.released { background: #1b4332; border-color: #43a047; color: #a5d6a7; }
+  .btn-brake.released:hover { background: #2e7d32; }
+
+  /* Camera panel */
+  .camera-panel {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 10px;
+    padding: 16px;
+  }
+
+  .camera-panel .panel-title { margin-bottom: 10px; }
+
+  #cam-img {
+    width: 100%;
+    border-radius: 6px;
+    background: #000;
+    display: block;
+    min-height: 200px;
+  }
+
+  .cam-status {
+    font-size: 11px;
+    color: #556677;
+    margin-top: 6px;
+    text-align: center;
+  }
+
+  /* Status bar */
+  #statusbar {
+    font-size: 11px;
+    color: #556677;
+    text-align: center;
+    margin-top: 4px;
+    min-height: 16px;
+  }
+
+  /* Keyboard hint */
+  .hint {
+    font-size: 10px;
+    color: #445566;
+    text-align: center;
+    margin-top: 10px;
+    line-height: 1.6;
+  }
+  kbd {
+    background: #0f3460;
+    border: 1px solid #1a6ba8;
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-size: 10px;
+    color: #99bbdd;
+  }
+</style>
+</head>
+<body>
+
+<h1>Drone &amp; Rover Controller</h1>
+
+<div style="text-align:center;margin-bottom:14px;">
+  <button id="btn-kb" onclick="toggleKb()"
+    style="background:#7f1d1d;border:1px solid #ef5350;border-radius:6px;color:#ffcdd2;
+           padding:6px 18px;cursor:pointer;font-size:12px;letter-spacing:1px;text-transform:uppercase;">
+    &#9711; KEYBOARD OFF
+  </button>
+  <span style="font-size:11px;color:#445566;margin-left:10px;">
+    Toggle keyboard shortcuts on/off to prevent accidental moves
+  </span>
+</div>
+
+<div class="layout">
+
+  <!-- ── LEFT COLUMN ───────────────────────────────── -->
+  <div class="left-col">
+
+    <!-- DRONE panel -->
+    <div class="panel">
+      <div class="panel-title">Drone Control</div>
+
+      <div class="step-row">
+        Step:
+        <select id="drone-step">
+          <option value="0.05">5 cm</option>
+          <option value="0.10">10 cm</option>
+          <option value="0.20" selected>20 cm</option>
+          <option value="0.50">50 cm</option>
+          <option value="1.00">1 m</option>
+        </select>
+        &nbsp;Yaw:
+        <select id="drone-yaw-step">
+          <option value="5">5°</option>
+          <option value="15" selected>15°</option>
+          <option value="30">30°</option>
+          <option value="45">45°</option>
+        </select>
+      </div>
+
+      <!-- Forward/Back/Left/Right d-pad -->
+      <div class="dpad">
+        <div class="spacer"></div>
+        <button class="btn" id="d-fwd"  title="Forward (W)">&#9650;</button>
+        <div class="spacer"></div>
+        <button class="btn" id="d-left" title="Left (A)">&#9664;</button>
+        <button class="btn" id="d-back" title="Back (S)">&#9660;</button>
+        <button class="btn" id="d-right"title="Right (D)">&#9654;</button>
+      </div>
+
+      <!-- Up / Down -->
+      <div class="row">
+        <button class="btn" id="d-up"   title="Up (R)" style="width:110px;height:44px;font-size:14px;">&#9650; UP</button>
+        <button class="btn" id="d-down" title="Down (F)" style="width:110px;height:44px;font-size:14px;">&#9660; DOWN</button>
+      </div>
+
+      <!-- Yaw -->
+      <div class="row">
+        <button class="btn" id="d-yaw-left"  title="Yaw left (Q)" style="width:110px;height:40px;font-size:13px;">&#8634; YAW L</button>
+        <button class="btn" id="d-yaw-right" title="Yaw right (E)" style="width:110px;height:40px;font-size:13px;">&#8635; YAW R</button>
+      </div>
+
+      <!-- Arm -->
+      <button class="btn btn-arm" id="btn-arm" title="Arm drone and engage offboard mode">ARM / OFFBOARD</button>
+
+      <div id="drone-statusbar" class="hint" style="margin-top:8px;">checking...</div>
+
+      <div class="hint">
+        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> = fwd/left/back/right &nbsp;
+        <kbd>R</kbd><kbd>F</kbd> = up/down &nbsp;
+        <kbd>Q</kbd><kbd>E</kbd> = yaw
+      </div>
+    </div>
+
+    <!-- ROVER panel -->
+    <div class="panel">
+      <div class="panel-title">Rover Control</div>
+
+      <div class="step-row">
+        Step:
+        <select id="rover-step">
+          <option value="0.10">10 cm</option>
+          <option value="0.20" selected>20 cm</option>
+          <option value="0.50">50 cm</option>
+          <option value="1.00">1 m</option>
+        </select>
+        &nbsp;Speed:
+        <select id="rover-speed">
+          <option value="0.3">Slow</option>
+          <option value="0.5" selected>Medium</option>
+          <option value="1.0">Fast</option>
+        </select>
+      </div>
+
+      <div class="dpad">
+        <div class="spacer"></div>
+        <button class="btn" id="r-fwd"   title="Forward (I)">&#9650;</button>
+        <div class="spacer"></div>
+        <button class="btn" id="r-left"  title="Turn left (J)">&#9664;</button>
+        <button class="btn" id="r-back"  title="Backward (K)">&#9660;</button>
+        <button class="btn" id="r-right" title="Turn right (L)">&#9654;</button>
+      </div>
+
+      <button class="btn btn-brake braked" id="btn-brake">&#128308; BRAKE (engaged)</button>
+
+      <div id="rover-statusbar" class="hint" style="margin-top:8px;">checking...</div>
+
+      <div class="hint">
+        <kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> = fwd/left/back/right &nbsp;
+        <kbd>Space</kbd> = brake toggle
+      </div>
+    </div>
+
+  </div><!-- end left-col -->
+
+  <!-- ── CAMERA panel (right, spans 2 rows) ─────────── -->
+  <div class="camera-panel" style="grid-row: 1 / 3;">
+    <div class="panel-title">Camera Feed — /rover_camera/image</div>
+    <img id="cam-img" src="/camera/stream" alt="camera feed"
+         onerror="this.alt='No feed — is the sim running?'">
+    <div class="cam-status">Live MJPEG &nbsp;|&nbsp; 15 fps &nbsp;|&nbsp; 1280×720</div>
+  </div>
+
+</div><!-- end layout -->
+
+<div id="statusbar"></div>
+
+<script>
+// ── helpers ──────────────────────────────────────────────────────────────────────
+
+function droneStep()   { return parseFloat(document.getElementById('drone-step').value); }
+function droneYaw()    { return parseFloat(document.getElementById('drone-yaw-step').value); }
+function roverStep()   { return parseFloat(document.getElementById('rover-step').value); }
+function roverSpeed()  { return parseFloat(document.getElementById('rover-speed').value); }
+function roverDuration() { return roverStep() / roverSpeed(); }
+
+function post(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+function flash(msg) {
+  const el = document.getElementById('statusbar');
+  el.textContent = msg;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.textContent = ''; }, 2000);
+}
+
+// ── drone buttons ────────────────────────────────────────────────────────────────
+
+const droneMap = {
+  'd-fwd':      () => post('/drone/move', {dir: 'fwd',       step: droneStep()}),
+  'd-back':     () => post('/drone/move', {dir: 'back',      step: droneStep()}),
+  'd-left':     () => post('/drone/move', {dir: 'left',      step: droneStep()}),
+  'd-right':    () => post('/drone/move', {dir: 'right',     step: droneStep()}),
+  'd-up':       () => post('/drone/move', {dir: 'up',        step: droneStep()}),
+  'd-down':     () => post('/drone/move', {dir: 'down',      step: droneStep()}),
+  'd-yaw-left': () => post('/drone/move', {dir: 'yaw_left',  step: droneYaw()}),
+  'd-yaw-right':() => post('/drone/move', {dir: 'yaw_right', step: droneYaw()}),
+};
+
+for (const [id, fn] of Object.entries(droneMap)) {
+  const btn = document.getElementById(id);
+  btn.addEventListener('pointerdown', () => { btn.classList.add('pressed'); fn(); });
+  btn.addEventListener('pointerup',   () => btn.classList.remove('pressed'));
+  btn.addEventListener('pointerleave',() => btn.classList.remove('pressed'));
+}
+
+// ── drone arm button ─────────────────────────────────────────────────────────────
+
+document.getElementById('btn-arm').addEventListener('click', () => {
+  flash('Arm command sent...');
+});
+
+// ── rover buttons ────────────────────────────────────────────────────────────────
+
+function roverMove(linear, angular) {
+  post('/rover/move', {linear, angular, duration: roverDuration()});
+}
+
+const roverMap = {
+  'r-fwd':   () => roverMove(roverSpeed(), 0),
+  'r-back':  () => roverMove(-roverSpeed(), 0),
+  'r-left':  () => roverMove(0, 1.2),
+  'r-right': () => roverMove(0, -1.2),
+};
+
+for (const [id, fn] of Object.entries(roverMap)) {
+  const btn = document.getElementById(id);
+  btn.addEventListener('pointerdown', () => { btn.classList.add('pressed'); fn(); });
+  btn.addEventListener('pointerup',   () => btn.classList.remove('pressed'));
+  btn.addEventListener('pointerleave',() => btn.classList.remove('pressed'));
+}
+
+// ── brake button ─────────────────────────────────────────────────────────────────
+
+let braked = true;
+
+function updateBrakeBtn() {
+  const btn = document.getElementById('btn-brake');
+  if (braked) {
+    btn.className = 'btn btn-brake braked';
+    btn.textContent = '🔴 BRAKE (engaged)';
+  } else {
+    btn.className = 'btn btn-brake released';
+    btn.textContent = '🟢 BRAKE (released)';
+  }
+}
+
+document.getElementById('btn-brake').addEventListener('click', () => {
+  if (braked) {
+    post('/rover/release').then(() => { braked = false; updateBrakeBtn(); });
+  } else {
+    post('/rover/brake').then(() => { braked = true; updateBrakeBtn(); });
+  }
+});
+
+// ── keyboard toggle ───────────────────────────────────────────────────────────────
+
+let kbActive = false;
+
+function toggleKb() {
+  kbActive = !kbActive;
+  const btn = document.getElementById('btn-kb');
+  if (kbActive) {
+    btn.textContent = '● KEYBOARD ON';
+    btn.style.background = '#1b4332';
+    btn.style.borderColor = '#43a047';
+    btn.style.color = '#a5d6a7';
+  } else {
+    btn.textContent = '○ KEYBOARD OFF';
+    btn.style.background = '#7f1d1d';
+    btn.style.borderColor = '#ef5350';
+    btn.style.color = '#ffcdd2';
+  }
+}
+
+// ── keyboard shortcuts ───────────────────────────────────────────────────────────
+
+const keyDown = {};
+
+document.addEventListener('keydown', (e) => {
+  if (!kbActive) return;
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (keyDown[e.code]) return;   // hold-repeat suppressed
+  keyDown[e.code] = true;
+
+  switch (e.code) {
+    // Drone WASD + RF + QE
+    case 'KeyW': droneMap['d-fwd'](); break;
+    case 'KeyS': droneMap['d-back'](); break;
+    case 'KeyA': droneMap['d-left'](); break;
+    case 'KeyD': droneMap['d-right'](); break;
+    case 'KeyR': droneMap['d-up'](); break;
+    case 'KeyF': droneMap['d-down'](); break;
+    case 'KeyQ': droneMap['d-yaw-left'](); break;
+    case 'KeyE': droneMap['d-yaw-right'](); break;
+
+    // Rover IJKL
+    case 'KeyI': roverMap['r-fwd'](); break;
+    case 'KeyK': roverMap['r-back'](); break;
+    case 'KeyJ': roverMap['r-left'](); break;
+    case 'KeyL': roverMap['r-right'](); break;
+
+    // Space = brake toggle
+    case 'Space':
+      e.preventDefault();
+      document.getElementById('btn-brake').click();
+      break;
+  }
+});
+
+document.addEventListener('keyup', (e) => { delete keyDown[e.code]; });
+
+// ── status polling ───────────────────────────────────────────────────────────────
+
+async function pollStatus() {
+  try {
+    const [ds, rs] = await Promise.all([
+      fetch('/drone/status').then(r => r.json()),
+      fetch('/rover/status').then(r => r.json()),
+    ]);
+
+    // Drone status bar
+    const armed = ds.armed ? '🟢 ARMED' : '🔴 DISARMED';
+    const pflight = ds.preflight_ok ? 'preflight OK' : 'preflight FAIL';
+    const alt = ds.z_ned != null ? `z=${(-ds.z_ned).toFixed(2)}m AGL` : '';
+    document.getElementById('drone-statusbar').textContent = `${armed} · ${pflight} · ${alt}`;
+
+    // Arm button style
+    document.getElementById('btn-arm').classList.toggle('armed', ds.armed);
+
+    // Rover status bar
+    document.getElementById('rover-statusbar').textContent =
+      rs.braked ? 'Brake: ENGAGED' : 'Brake: released';
+
+    // Keep brake button in sync if something external changed it
+    if (rs.braked !== braked) {
+      braked = rs.braked;
+      updateBrakeBtn();
+    }
+  } catch (_) { /* sim not running yet */ }
+}
+
+setInterval(pollStatus, 1000);
+pollStatus();
+</script>
+</body>
+</html>
