@@ -158,17 +158,22 @@ pip install -r controller/requirements-detector.txt
    ```bash
    bash ~/github_desktop/circe/gazebo/launch_baylands.sh
    ```
-2. **Laptop 1** — start the controller (prints the laptop-2 command):
+2. **Laptop 1** — open firewall and start the controller:
    ```bash
+   sudo ufw allow 8080/tcp
    bash ~/github_desktop/circe/controller/run_remote.sh
    ```
-3. **Laptop 2** — start the detector (use the IP printed above):
+3. **Laptop 2** — start the detector:
    ```bash
-   bash ~/github_desktop/circe/controller/run_detector.sh ws://<laptop1-ip>:8080
+   bash ~/github_desktop/circe/controller/run_detector.sh
    ```
    If your conda env isn't at the default path, override it:
-   `CONDA_PY=/path/to/python bash run_detector.sh ws://<laptop1-ip>:8080`
+   `CONDA_PY=/path/to/python bash run_detector.sh`
 4. **Laptop 1** — open the browser: `http://localhost:8080`
+5. **When done** — remove the firewall rule:
+   ```bash
+   sudo ufw delete allow 8080/tcp
+   ```
 
 ### Logs (debug the link end-to-end)
 
