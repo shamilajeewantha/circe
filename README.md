@@ -110,16 +110,25 @@ git clone <this-repo>
 cd circe
 git lfs pull        # pulls drone_detection/best.pt (110 MB, via Git LFS)
 
-# create/activate a conda env (Python 3.11) and install the pinned detector deps:
+# Create the conda env from the exported spec (installs Python 3.11 + PyTorch CUDA + YOLO):
+conda env create -f controller/environment-detector.yml
+conda activate drone_detect
+```
+
+That's it — the env file pins everything. `run_detector.sh` will also auto-create the env
+if it doesn't exist yet, so you can skip the `conda env create` step and just run the script.
+
+**If conda env create fails** (e.g. your GPU needs a different CUDA build), fall back to manual:
+
+```bash
 conda create -n drone_detect python=3.11 -y
 conda activate drone_detect
-
-# torch MUST be the CUDA build (not CPU) — install it first from the PyTorch index:
 pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu118
 pip install -r controller/requirements-detector.txt
 ```
 
-**Verified versions** (laptop 1 reference env — GTX 1650, CUDA 11.8) pinned in
+**Verified versions** (laptop 1 reference env — GTX 1650, CUDA 11.8) exported to
+[`controller/environment-detector.yml`](controller/environment-detector.yml) and pinned in
 [`controller/requirements-detector.txt`](controller/requirements-detector.txt):
 
 | Package | Version |
@@ -128,7 +137,7 @@ pip install -r controller/requirements-detector.txt
 | torch | 2.5.1 (cu118) |
 | torchvision | 0.20.1 |
 | ultralytics | 8.4.62 |
-| opencv-python | 4.10.0 |
+| opencv | 4.10.0 |
 | numpy | 1.26.4 |
 | websockets | (latest) |
 

@@ -11,15 +11,34 @@ set -e
 
 SERVER="${1:?Usage: bash run_detector.sh ws://<laptop1-ip>:8080}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_YML="$DIR/environment-detector.yml"
 
-# Conda python that has ultralytics (GPU torch) + opencv + websockets.
-# Override if your env lives elsewhere:  CONDA_PY=/path/to/python bash run_detector.sh ...
-CONDA_PY="${CONDA_PY:-/home/$USER/anaconda3/envs/drone_detect/bin/python3}"
+# Conda python — override with CONDA_PY=/path/to/python if your env lives elsewhere.
+CONDA_PY="${CONDA_PY:-}"
+
+# If no override given, look for the drone_detect conda env and create it if needed.
+if [ -z "$CONDA_PY" ]; then
+    CONDA_BIN="$(conda info --base 2>/dev/null)/bin/conda"
+    if [ ! -x "$CONDA_BIN" ]; then
+        echo "[detector] ERROR: conda not found. Install Miniconda/Anaconda first."
+        exit 1
+    fi
+
+    if ! conda env list | grep -q '^drone_detect '; then
+        echo "[detector] 'drone_detect' env not found — creating from $ENV_YML ..."
+        echo "[detector] (this installs PyTorch + CUDA + YOLO and may take a few minutes)"
+        "$CONDA_BIN" env create -f "$ENV_YML"
+        echo "[detector] env created."
+    else
+        echo "[detector] 'drone_detect' env already exists — skipping create."
+    fi
+
+    CONDA_PY="$(conda run -n drone_detect which python3)"
+fi
 
 echo "[detector] using python: $CONDA_PY"
-# Make sure the lighter deps are present (torch/torchvision should already be the
-# CUDA build — see controller/requirements-detector.txt for the one-time install).
-"$CONDA_PY" -m pip install -q websockets opencv-python ultralytics
+# Ensure websockets is present (lightweight, safe to re-run).
+"$CONDA_PY" -m pip install -q websockets
 echo "[detector] connecting to $SERVER ..."
 cd "$DIR"
 "$CONDA_PY" detect_client.py --server "$SERVER"
