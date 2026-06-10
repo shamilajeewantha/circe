@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Single-laptop mode — YOLO runs locally on this machine.
-# Usage: bash controller/run.sh
+# Two-laptop mode — YOLO runs on laptop 2, this machine is server only.
+# Usage: bash controller/run_remote.sh
 #
 # Then open: http://localhost:8080
 
 CTRL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export DETECT_MODE=local
+export DETECT_MODE=remote
 
 cleanup() {
     echo ""
@@ -28,7 +28,13 @@ source "$HOME/ws_px4/install/local_setup.bash"
 echo "[controller] Installing Python dependencies..."
 pip3 install -q fastapi "uvicorn[standard]" opencv-python --break-system-packages
 
-echo "[controller] DETECT_MODE=local"
+IP=$(hostname -I | awk '{print $1}')
+echo "[controller] DETECT_MODE=remote"
+echo "[controller] ──────────────────────────────────────────────────"
+echo "[controller] On laptop 2, run:"
+echo "      bash controller/run_detector.sh ws://$IP:8080"
+echo "[controller] ──────────────────────────────────────────────────"
+echo "[controller] (firewall: sudo ufw allow 8080/tcp  — remove: sudo ufw delete allow 8080/tcp)"
 echo "[controller] Starting server on http://0.0.0.0:8080 ..."
 cd "$CTRL_DIR"
 mkdir -p "$CTRL_DIR/logs"

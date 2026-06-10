@@ -148,24 +148,27 @@ pip install -r controller/requirements-detector.txt
 
 ### Run order
 
+**Single laptop (YOLO runs locally):**
+1. `bash ~/github_desktop/circe/gazebo/launch_baylands.sh`
+2. `bash ~/github_desktop/circe/controller/run.sh`
+3. Open `http://localhost:8080`
+
+**Two laptops (YOLO on laptop 2):**
 1. **Laptop 1** — start the sim:
    ```bash
    bash ~/github_desktop/circe/gazebo/launch_baylands.sh
    ```
-2. **Laptop 1** — start the controller in remote mode (prints the exact laptop-2 command):
+2. **Laptop 1** — start the controller (prints the laptop-2 command):
    ```bash
-   bash ~/github_desktop/circe/controller/run.sh --remote
+   bash ~/github_desktop/circe/controller/run_remote.sh
    ```
-3. **Laptop 2** — start the detector (use laptop 1's IP):
+3. **Laptop 2** — start the detector (use the IP printed above):
    ```bash
    bash ~/github_desktop/circe/controller/run_detector.sh ws://<laptop1-ip>:8080
    ```
    If your conda env isn't at the default path, override it:
    `CONDA_PY=/path/to/python bash run_detector.sh ws://<laptop1-ip>:8080`
-4. **Laptop 1** — open the browser as usual: `http://localhost:8080`
-
-> Single-laptop mode is unchanged — just run `bash controller/run.sh` (no `--remote`),
-> and YOLO runs on-board.
+4. **Laptop 1** — open the browser: `http://localhost:8080`
 
 ### Logs (debug the link end-to-end)
 

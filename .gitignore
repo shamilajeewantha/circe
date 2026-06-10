@@ -1,3 +1,8 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
 # Analysis output files — contain raw captured traffic and personal phone data
 capture_analysis.txt
 drone_packets.txt
