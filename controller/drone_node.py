@@ -88,6 +88,8 @@ class DroneNode(Node):
         return {
             'armed': bool(self._status.arming_state == VehicleStatus.ARMING_STATE_ARMED),
             'preflight_ok': bool(self._status.pre_flight_checks_pass),
+            'x_ned': float(self._local_pos.x),
+            'y_ned': float(self._local_pos.y),
             'z_ned': float(self._local_pos.z),
             'nav_state': int(self._status.nav_state),
         }

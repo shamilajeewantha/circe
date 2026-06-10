@@ -1,0 +1,424 @@
+Controller server starting on http://0.0.0.0:8080
+INFO:     Started server process [97777]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+[INFO] [1781112515.378419854] [drone_controller]: Drone controller node started
+[INFO] [1781112515.417392313] [rover_controller]: Rover controller node started (braked)
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+[INFO] [1781112515.567914079] [camera_stream]: Camera stream node started (YOLO loading in background...)
+[INFO] [1781112515.570243637] [camera_stream]: Starting detection worker: /home/shamila/anaconda3/envs/drone_detect/bin/python3
+[INFO] [1781112515.670825833] [camera_stream]: FIRST camera frame received: 1280x720 encoding=rgb8
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:58:36.150 [INFO] controller: [FRONTEND] connecting WS ws://0.0.0.0:8080/ws/camera
+INFO:     127.0.0.1:33526 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33536 - "WebSocket /ws/camera" [accepted]
+22:58:36.162 [INFO] controller: [WS] client connected: Address(host='127.0.0.1', port=33536)
+INFO:     connection open
+22:58:36.198 [INFO] controller: [WS] sent 1 frames (last=70387 bytes) to Address(host='127.0.0.1', port=33536)
+22:58:36.199 [INFO] controller: [FRONTEND] WS open
+INFO:     127.0.0.1:33518 - "POST /log HTTP/1.1" 200 OK
+22:58:36.218 [INFO] controller: [FRONTEND] WS frame #1 (70387 bytes)
+INFO:     127.0.0.1:33518 - "POST /log HTTP/1.1" 200 OK
+22:58:36.253 [INFO] controller: [FRONTEND] FIRST frame decoded 1280x720
+INFO:     127.0.0.1:33518 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+[INFO] [1781112516.892412341] [drone_controller]: Switching to offboard mode
+[INFO] [1781112516.894805982] [drone_controller]: Arm command sent
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:58:40.781 [INFO] controller: [WS] sent 60 frames (last=70400 bytes) to Address(host='127.0.0.1', port=33536)
+22:58:40.793 [INFO] controller: [FRONTEND] WS frame #60 (70400 bytes)
+INFO:     127.0.0.1:33526 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+[INFO] [1781112523.643277558] [camera_stream]: Detection worker ready — bbox overlay active
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:58:45.332 [INFO] controller: [WS] sent 120 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:58:45.339 [INFO] controller: [FRONTEND] WS frame #120 (72613 bytes)
+INFO:     127.0.0.1:33526 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+[INFO] [1781112525.486656438] [drone_controller]: Hovering z=-1.77m NED  sp=(2.78,-1.18,-2.00)
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:58:49.851 [INFO] controller: [WS] sent 180 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:58:49.855 [INFO] controller: [FRONTEND] WS frame #180 (72613 bytes)
+INFO:     127.0.0.1:33508 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:58:54.251 [INFO] controller: [WS] sent 240 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:58:54.258 [INFO] controller: [FRONTEND] WS frame #240 (72613 bytes)
+INFO:     127.0.0.1:33508 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+[INFO] [1781112535.481211700] [drone_controller]: Hovering z=-2.00m NED  sp=(2.78,-1.18,-2.00)
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:58:58.635 [INFO] controller: [WS] sent 300 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:58:58.639 [INFO] controller: [FRONTEND] WS frame #300 (72613 bytes)
+INFO:     127.0.0.1:33518 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:59:03.060 [INFO] controller: [WS] sent 360 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:59:03.066 [INFO] controller: [FRONTEND] WS frame #360 (72613 bytes)
+INFO:     127.0.0.1:33526 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+[INFO] [1781112545.482343613] [drone_controller]: Hovering z=-2.02m NED  sp=(2.78,-1.18,-2.00)
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+22:59:07.453 [INFO] controller: [WS] sent 420 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:59:07.466 [INFO] controller: [FRONTEND] WS frame #420 (72613 bytes)
+INFO:     127.0.0.1:33508 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:59:11.864 [INFO] controller: [WS] sent 480 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:59:11.868 [INFO] controller: [FRONTEND] WS frame #480 (72613 bytes)
+INFO:     127.0.0.1:33508 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+[INFO] [1781112555.485375194] [drone_controller]: Hovering z=-2.03m NED  sp=(2.78,-1.18,-2.00)
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:59:16.316 [INFO] controller: [WS] sent 540 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:59:16.319 [INFO] controller: [FRONTEND] WS frame #540 (72613 bytes)
+INFO:     127.0.0.1:33526 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+22:59:20.882 [INFO] controller: [WS] sent 600 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:59:20.893 [INFO] controller: [FRONTEND] WS frame #600 (72613 bytes)
+INFO:     127.0.0.1:33526 - "POST /log HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /rover/status HTTP/1.1" 200 OK
+22:59:25.408 [INFO] controller: [WS] sent 660 frames (last=72613 bytes) to Address(host='127.0.0.1', port=33536)
+22:59:25.417 [INFO] controller: [FRONTEND] WS frame #660 (72613 bytes)
+INFO:     127.0.0.1:33526 - "POST /log HTTP/1.1" 200 OK
+[INFO] [1781112565.484812974] [drone_controller]: Hovering z=-1.98m NED  sp=(2.78,-1.18,-2.00)
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33518 - "GET /drone/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33508 - "GET /rover/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /detection/boxes HTTP/1.1" 200 OK

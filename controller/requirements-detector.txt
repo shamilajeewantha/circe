@@ -1,0 +1,22 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Laptop 2 (remote YOLO detector) — pinned to match laptop 1's `drone_detect` env.
+# Used by detect_client.py / run_detector.sh.
+#
+# Reference machine: Python 3.11.15, NVIDIA GTX 1650, CUDA 11.8.
+#
+# IMPORTANT — torch must be the CUDA 11.8 build, not the CPU wheel. Install torch
+# FIRST from the PyTorch CUDA index, then the rest:
+#
+#   pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu118
+#   pip install -r requirements-detector.txt
+#
+# (If laptop 2 has a newer GPU/driver, you may use a cu121 build instead — keep the
+#  torch/torchvision pair matched: torch 2.5.1 ↔ torchvision 0.20.1.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+torch==2.5.1
+torchvision==0.20.1
+ultralytics==8.4.62
+opencv-python==4.10.0
+numpy==1.26.4
+websockets

@@ -1,5 +1,176 @@
 # circe
 
+---
+
+## Gazebo Simulation Stack — Launch Order
+
+> PX4 SITL + Explorer R2 rover + YOLOv8 drone detection + web controller
+
+### Prerequisites
+- PX4 built: `~/PX4-Autopilot/build/px4_sitl_default/bin/px4`
+- ROS2 Jazzy + px4_msgs workspace: `~/ws_px4/install/`
+- MicroXRCEAgent installed: `which MicroXRCEAgent`
+- conda env `drone_detect` with ultralytics: `/home/shamila/anaconda3/envs/drone_detect/bin/python3`
+
+### Step 1 — Start the sim (Terminal 1)
+
+```bash
+bash ~/github_desktop/circe/gazebo/launch_baylands.sh
+```
+
+Starts: MicroXRCEAgent → PX4 SITL + Gazebo (Baylands world) → GCS heartbeat → camera bridge → rover cmd_vel bridge.
+Wait for: `Sim stack is running.`
+
+### Step 2 — Start the web controller (Terminal 2)
+
+```bash
+bash ~/github_desktop/circe/controller/run.sh
+```
+
+Starts: FastAPI server on port 8080 → arms drone → starts hovering → loads `drone_detection/best.pt` via conda env subprocess.
+Wait for: `Detection worker ready`
+
+### Step 3 — Open the browser
+
+```
+http://localhost:8080
+```
+
+Over SSH: `ssh -L 8080:localhost:8080 user@host` then open `http://localhost:8080`
+
+The page shows:
+- **Camera feed** — live ~15 fps video (WebSocket) with red bounding boxes drawn as a
+  canvas overlay (YOLO11x `best.pt`, confidence ≥ 50%) + a distance HUD
+- **Left panel** — drone d-pad + up/down/yaw, step size dropdown
+- **Right panel** — rover d-pad, handbrake toggle (starts engaged)
+
+> Keyboard shortcuts are off by default — click **KEYBOARD OFF** to enable.
+> Keys: `WASD` + `RF` + `QE` = drone, `IJKL` + `Space` = rover/brake.
+
+### Folder layout
+
+| Path | Purpose |
+|---|---|
+| `gazebo/` | Launch scripts, SDF world files, takeoff node, YOLO detector node |
+| `controller/` | FastAPI web controller — drone + rover + WebSocket camera video + detection overlay (local or remote YOLO) |
+| `drone_detection/best.pt` | Custom-trained YOLO11x drone detection model (Git LFS) |
+
+See [`gazebo/README.md`](gazebo/README.md) for detailed manual launch steps and known issues.
+
+---
+
+## Distributed Detection — Offload YOLO to a Second Laptop
+
+YOLO11x at full resolution is heavy and competes with Gazebo for the GPU, which can
+make the video stutter. You can run the **sim + controller on this laptop (laptop 1)**
+and offload **only the YOLO inference to a second laptop (laptop 2)**.
+
+> **Roles:** Laptop 1 (this machine) runs the **server** (`run.sh`) — all control,
+> video, and the web UI stay here. Laptop 2 is **only a detector client**
+> (`run_detector.sh`): it connects in, receives JPEG frames, runs YOLO on its GPU,
+> and sends bounding boxes back. Laptop 2 has no UI.
+
+```
+LAPTOP 1 (sim + controller, run.sh)            LAPTOP 2 (GPU, run_detector.sh)
+ Gazebo → camera_node → JPEG (~70KB)              detect_client.py
+   ├─ /ws/camera  ──────────────► browser video       │
+   └─ /ws/detect  ──JPEG frame──►─────────────────────►│ YOLO on GPU
+                  ◄──JSON boxes──◄─────────────────────┤
+        camera_node.set_boxes() → /detection/boxes → browser overlay
+```
+
+### Network + firewall (on laptop 1, the server)
+
+Both laptops must be on the **same LAN/WiFi**. Find laptop 1's IP:
+
+```bash
+hostname -I        # use the first address, e.g. 192.168.1.42
+```
+
+Laptop 2 connects to TCP port **8080**. If the firewall (`ufw`) is active on laptop 1,
+open it:
+
+```bash
+sudo ufw status                  # check whether the firewall is active
+sudo ufw allow 8080/tcp          # ENABLE: let laptop 2 reach the server
+```
+
+When you're done, remove the rule again:
+
+```bash
+sudo ufw delete allow 8080/tcp   # REMOVE the rule
+```
+
+(If `ufw status` reports `inactive`, no firewall change is needed.)
+
+### Laptop 2 — one-time setup
+
+```bash
+git clone <this-repo>
+cd circe
+git lfs pull        # pulls drone_detection/best.pt (110 MB, via Git LFS)
+
+# create/activate a conda env (Python 3.11) and install the pinned detector deps:
+conda create -n drone_detect python=3.11 -y
+conda activate drone_detect
+
+# torch MUST be the CUDA build (not CPU) — install it first from the PyTorch index:
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu118
+pip install -r controller/requirements-detector.txt
+```
+
+**Verified versions** (laptop 1 reference env — GTX 1650, CUDA 11.8) pinned in
+[`controller/requirements-detector.txt`](controller/requirements-detector.txt):
+
+| Package | Version |
+|---|---|
+| Python | 3.11.15 |
+| torch | 2.5.1 (cu118) |
+| torchvision | 0.20.1 |
+| ultralytics | 8.4.62 |
+| opencv-python | 4.10.0 |
+| numpy | 1.26.4 |
+| websockets | (latest) |
+
+> Confirm the GPU is picked up: when `run_detector.sh` starts it prints
+> `model loaded on device=cuda:0`. If it says `cpu`, torch installed the CPU wheel —
+> reinstall it from the cu118 index above. (If laptop 2 has a newer driver, a `cu121`
+> torch build also works; keep torch 2.5.1 ↔ torchvision 0.20.1 matched.)
+
+### Run order
+
+1. **Laptop 1** — start the sim:
+   ```bash
+   bash ~/github_desktop/circe/gazebo/launch_baylands.sh
+   ```
+2. **Laptop 1** — start the controller in remote mode (prints the exact laptop-2 command):
+   ```bash
+   bash ~/github_desktop/circe/controller/run.sh --remote
+   ```
+3. **Laptop 2** — start the detector (use laptop 1's IP):
+   ```bash
+   bash ~/github_desktop/circe/controller/run_detector.sh ws://<laptop1-ip>:8080
+   ```
+   If your conda env isn't at the default path, override it:
+   `CONDA_PY=/path/to/python bash run_detector.sh ws://<laptop1-ip>:8080`
+4. **Laptop 1** — open the browser as usual: `http://localhost:8080`
+
+> Single-laptop mode is unchanged — just run `bash controller/run.sh` (no `--remote`),
+> and YOLO runs on-board.
+
+### Logs (debug the link end-to-end)
+
+- **Laptop 1 server** — captured in `controller/logs/controller_*.log`:
+  `[detect] remote detector connected: <ip>`, `[detect] result #30 …`,
+  `[detect] remote detector disconnected … after N results`.
+- **Laptop 2 client** — printed to its terminal:
+  `model loaded on device=cuda:0`, `connected to ws://…/ws/detect`,
+  `N frames, X fps, last=K boxes`, and `connection lost (…); retry in 2s` on drop.
+
+---
+
+## DM002HW WiFi Drone
+
 Python controller for the **DM002HW** drone (and compatible WiFi UAV family) — no official app required.
 
 ---
