@@ -26,6 +26,7 @@ MODEL_PATH = Path(__file__).parent.parent / 'drone_detection' / 'best.pt'
 async def run(url: str) -> None:
     print(f'[detector] loading model: {MODEL_PATH}')
     model = YOLO(str(MODEL_PATH))
+    model.to('cuda')
     print(f'[detector] model loaded on device={model.device}')
 
     endpoint = url.rstrip('/') + '/ws/detect'

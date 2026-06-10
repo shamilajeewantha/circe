@@ -18,30 +18,18 @@ LAPTOP1_IP="192.168.1.5"
 SERVER="${1:-ws://$LAPTOP1_IP:8080}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Conda python — override with CONDA_PY=/path/to/python if your env lives elsewhere.
-CONDA_PY="${CONDA_PY:-}"
+# Use python from the active conda env (run: conda activate drone_detect first).
+# Override with CONDA_PY=/path/to/python if needed.
+CONDA_PY="${CONDA_PY:-$(command -v python || command -v python3)}"
 
 if [ -z "$CONDA_PY" ]; then
-    CONDA_BIN="$(conda info --base 2>/dev/null)/bin/conda"
-    if [ ! -x "$CONDA_BIN" ]; then
-        echo "[detector] ERROR: conda not found. Install Miniconda/Anaconda first."
-        exit 1
-    fi
-
-    ENV_YML="$DIR/environment-detector.yml"
-    if ! conda env list | grep -q '^drone_detect '; then
-        echo "[detector] 'drone_detect' env not found — creating from $ENV_YML ..."
-        echo "[detector] (this installs PyTorch + CUDA + YOLO and may take a few minutes)"
-        "$CONDA_BIN" env create -f "$ENV_YML"
-        echo "[detector] env created."
-    else
-        echo "[detector] 'drone_detect' env already exists — skipping create."
-    fi
-
-    CONDA_PY="$(conda run -n drone_detect which python3)"
+    echo "[detector] ERROR: python not found. Activate the conda env first:"
+    echo "    conda activate drone_detect"
+    exit 1
 fi
 
 echo "[detector] using python: $CONDA_PY"
-echo "[detector] connecting to $SERVER ..."
+echo "[detector] loading model (this takes ~15s first time) ..."
+echo "[detector] will connect to $SERVER after model loads"
 cd "$DIR"
 "$CONDA_PY" detect_client.py --server "$SERVER"

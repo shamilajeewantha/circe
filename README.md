@@ -10,7 +10,7 @@
 - PX4 built: `~/PX4-Autopilot/build/px4_sitl_default/bin/px4`
 - ROS2 Jazzy + px4_msgs workspace: `~/ws_px4/install/`
 - MicroXRCEAgent installed: `which MicroXRCEAgent`
-- conda env `drone_detect` with ultralytics: `/home/shamila/anaconda3/envs/drone_detect/bin/python3`
+- conda env `drone_detect` with ultralytics (see Distributed Detection section for setup)
 
 ### Step 1 — Start the sim (Terminal 1)
 
@@ -123,28 +123,52 @@ if it doesn't exist yet, so you can skip the `conda env create` step and just ru
 ```bash
 conda create -n drone_detect python=3.11 -y
 conda activate drone_detect
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu118
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 pip install -r controller/requirements-detector.txt
 ```
 
-**Verified versions** (laptop 1 reference env — GTX 1650, CUDA 11.8) exported to
-[`controller/environment-detector.yml`](controller/environment-detector.yml) and pinned in
-[`controller/requirements-detector.txt`](controller/requirements-detector.txt):
+**Verified versions** exported to
+[`controller/environment-detector.yml`](controller/environment-detector.yml):
 
-| Package | Version |
-|---|---|
-| Python | 3.11.15 |
-| torch | 2.5.1 (cu118) |
-| torchvision | 0.20.1 |
-| ultralytics | 8.4.62 |
-| opencv | 4.10.0 |
-| numpy | 1.26.4 |
-| websockets | (latest) |
+| Package | Version | Notes |
+|---|---|---|
+| Python | 3.11.15 | |
+| torch | 2.5.1 | cu121 build (RTX 4050, CUDA 12.x driver) |
+| torchvision | 0.20.1 | |
+| ultralytics | 8.4.62 | |
+| opencv | 4.10.0 | |
+| numpy | 1.26.4 | |
+| websockets | (latest) | |
+
+> **CUDA build to use:** `cu121` works with any driver that supports CUDA 12.x (RTX 30/40 series).
+> Use `cu118` only if your driver tops out at CUDA 11.x (GTX 16/20 series or older).
+> Keep torch 2.5.1 ↔ torchvision 0.20.1 matched regardless of CUDA version.
 
 > Confirm the GPU is picked up: when `run_detector.sh` starts it prints
 > `model loaded on device=cuda:0`. If it says `cpu`, torch installed the CPU wheel —
-> reinstall it from the cu118 index above. (If laptop 2 has a newer driver, a `cu121`
-> torch build also works; keep torch 2.5.1 ↔ torchvision 0.20.1 matched.)
+> reinstall it with the correct `--index-url` above.
+
+#### Windows (laptop 2 is Windows)
+
+`run_detector.sh` is a bash script. On Windows, run it via **Git Bash** (installed with Git for Windows):
+
+```bash
+# Open Git Bash, then:
+bash /d/my_github/circe/controller/run_detector.sh
+```
+
+Or right-click the `controller/` folder → **Git Bash Here**, then:
+
+```bash
+bash run_detector.sh
+```
+
+conda must be initialized in Git Bash first (one-time):
+
+```bash
+/d/PROGRAM_FILES/anaconda/Scripts/conda init bash
+# restart Git Bash, then conda activate drone_detect should work
+```
 
 ### Run order
 
@@ -165,8 +189,9 @@ pip install -r controller/requirements-detector.txt
    ```
 3. **Laptop 2** — start the detector:
    ```bash
-   bash ~/github_desktop/circe/controller/run_detector.sh
+   bash run_detector.sh
    ```
+   On Windows, open **Git Bash** in the `controller/` folder and run the same command.
    If your conda env isn't at the default path, override it:
    `CONDA_PY=/path/to/python bash run_detector.sh`
 4. **Laptop 1** — open the browser: `http://localhost:8080`
