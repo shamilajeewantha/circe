@@ -162,7 +162,8 @@ Sending GCS heartbeats — keep this running while flying...
 
 ### Terminal 4 — Rover camera bridge (Gazebo → ROS 2)
 
-The inline `rover_cam` model is fixed-jointed to the rover front. It publishes a 1280×720 image.
+The inline `rover_cam` model is fixed-jointed to the rover front. It publishes a 1920×1080 image
+(simulated Raspberry Pi Camera Module v2 — Sony IMX219, 8MP, hFOV=62.2°).
 The bridge remaps Gazebo's auto-generated topic to `/rover_camera/image`.
 
 ```bash
@@ -311,4 +312,4 @@ The rover requires the DiffDrive plugin injected into both world SDFs (already d
 | Rover buried in ground (default) | Wrong z pose in SDF include | Must be `z=0.4` — matches the model's canonical pose (wheel radius 0.31 m + joint offset) |
 | Rover buried in ground (baylands) | Baylands has non-flat terrain mesh | Rover is non-static and drops from z=10 onto actual terrain surface |
 | Camera image dark / black trees | Baylands ambient was blue-purple `0.8 0.5 1` | Fixed: ambient changed to neutral `0.8 0.8 0.8 1` in baylands.sdf |
-| Camera image pixelated (320×240) | Fuel Camera model hardcodes 320×240, can't be overridden via `<include>` | Fixed: replaced with inline `<model>` at 1280×720 in both world SDFs |
+| Camera image pixelated (320×240) | Fuel Camera model hardcodes 320×240, can't be overridden via `<include>` | Fixed: replaced with inline `<model>` at 1920×1080 (RPi Camera Module v2) in both world SDFs |

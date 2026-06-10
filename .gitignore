@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Controller runtime logs
+controller/logs/
+
 # Analysis output files — contain raw captured traffic and personal phone data
 capture_analysis.txt
 drone_packets.txt

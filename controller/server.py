@@ -106,7 +106,7 @@ async def camera_ws(websocket: WebSocket):
                 if none_count == 1 or none_count % 30 == 0:
                     state = 'set' if camera_node else 'None'
                     log.warning(f'[WS] no frame available yet (camera_node={state}), count={none_count}')
-            await asyncio.sleep(1 / 15)
+            await asyncio.sleep(1 / 30)
     except WebSocketDisconnect:
         log.info(f'[WS] client disconnected: {client} after {sent} frames')
     except Exception:

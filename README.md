@@ -39,7 +39,7 @@ http://localhost:8080
 Over SSH: `ssh -L 8080:localhost:8080 user@host` then open `http://localhost:8080`
 
 The page shows:
-- **Camera feed** — live ~15 fps video (WebSocket) with red bounding boxes drawn as a
+- **Camera feed** — live ~30 fps video (WebSocket) with red bounding boxes drawn as a
   canvas overlay (YOLO11x `best.pt`, confidence ≥ 50%) + a distance HUD
 - **Left panel** — drone d-pad + up/down/yaw, step size dropdown
 - **Right panel** — rover d-pad, handbrake toggle (starts engaged)
@@ -115,8 +115,7 @@ conda env create -f controller/environment-detector.yml
 conda activate drone_detect
 ```
 
-That's it — the env file pins everything. `run_detector.sh` will also auto-create the env
-if it doesn't exist yet, so you can skip the `conda env create` step and just run the script.
+That's it — the env file pins everything. **Always `conda activate drone_detect` before running `run_detector.sh`** — the script uses whatever python is active in the shell.
 
 **If conda env create fails** (e.g. your GPU needs a different CUDA build), fall back to manual:
 

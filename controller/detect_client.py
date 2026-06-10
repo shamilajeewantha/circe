@@ -38,7 +38,7 @@ async def run(url: str) -> None:
                 async for message in ws:                   # binary JPEG, one at a time
                     arr = cv2.imdecode(np.frombuffer(message, np.uint8), cv2.IMREAD_COLOR)
                     boxes = []
-                    for r in model(arr, verbose=False, conf=0.5, imgsz=1280):
+                    for r in model(arr, verbose=False, conf=0.5, imgsz=1920):
                         for b in r.boxes:
                             x1, y1, x2, y2 = b.xyxy[0].tolist()
                             boxes.append({
