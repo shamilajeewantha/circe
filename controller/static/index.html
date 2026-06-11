@@ -328,6 +328,9 @@
       <canvas id="bbox-canvas"
         style="position:absolute;top:0;left:0;width:100%;height:100%;border-radius:6px;pointer-events:none;">
       </canvas>
+      <canvas id="crosshair-canvas"
+        style="position:absolute;top:0;left:0;width:100%;height:100%;border-radius:6px;pointer-events:none;">
+      </canvas>
     </div>
     <div class="cam-status">Live ~15 fps (WebSocket) &nbsp;|&nbsp; bbox overlay &nbsp;|&nbsp; 1280×720</div>
 
@@ -642,6 +645,41 @@ async function pollStatus() {
 
 setInterval(pollStatus, 1000);
 pollStatus();
+
+// ── crosshair overlay ────────────────────────────────────────────────────────────
+
+function drawCrosshair() {
+  const canvas = document.getElementById('crosshair-canvas');
+  const vc     = document.getElementById('video-canvas');
+  const w = vc.clientWidth  || 640;
+  const h = vc.clientHeight || 360;
+  if (canvas.width !== w)  canvas.width  = w;
+  if (canvas.height !== h) canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth   = 1;
+
+  const cols = 6, rows = 4;
+  for (let i = 1; i < cols; i++) {
+    const x = (w / cols) * i;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+  }
+  for (let i = 1; i < rows; i++) {
+    const y = (h / rows) * i;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+
+  // centre dot
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.beginPath();
+  ctx.arc(w / 2, h / 2, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+drawCrosshair();
+window.addEventListener('resize', drawCrosshair);
 </script>
 </body>
 </html>
