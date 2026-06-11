@@ -329,7 +329,7 @@
         style="position:absolute;top:0;left:0;width:100%;height:100%;border-radius:6px;pointer-events:none;">
       </canvas>
     </div>
-    <div class="cam-status">Live ~15 fps (WebSocket) &nbsp;|&nbsp; bbox overlay ~5 fps &nbsp;|&nbsp; 1280×720</div>
+    <div class="cam-status">Live ~15 fps (WebSocket) &nbsp;|&nbsp; bbox overlay &nbsp;|&nbsp; 1280×720</div>
 
     <div style="margin-top:12px;padding:10px;background:#0d1b2e;border-radius:8px;
                 font-family:monospace;font-size:13px;color:#7eb8f7;line-height:2;">
@@ -532,6 +532,8 @@ document.addEventListener('keyup', (e) => { delete keyDown[e.code]; });
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     if (!firstDecode) {
       firstDecode = true;
+      _srcW = img.naturalWidth;
+      _srcH = img.naturalHeight;
       clog('info', `FIRST frame decoded ${img.naturalWidth}x${img.naturalHeight}`);
     }
     URL.revokeObjectURL(img.src);
@@ -560,6 +562,7 @@ document.addEventListener('keyup', (e) => { delete keyDown[e.code]; });
 // ── bbox overlay ─────────────────────────────────────────────────────────────────
 
 const ROVER_NED_X = 0, ROVER_NED_Y = -6;   // approximate rover NED position
+let _srcW = 0, _srcH = 0;                  // actual camera frame size, set on first JPEG decode
 
 async function pollBoxes() {
   try {
@@ -570,8 +573,9 @@ async function pollBoxes() {
     const dispH  = vc.clientHeight || 360;
     if (canvas.width !== dispW)  canvas.width  = dispW;
     if (canvas.height !== dispH) canvas.height = dispH;
-    const sx = dispW / 1280;
-    const sy = dispH / 720;
+    if (!_srcW) return;
+    const sx = dispW / _srcW;
+    const sy = dispH / _srcH;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, dispW, dispH);
     for (const b of data.boxes) {

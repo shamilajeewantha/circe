@@ -81,7 +81,8 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), 'static')
 
 @app.get('/')
 async def index():
-    return FileResponse(os.path.join(STATIC_DIR, 'index.html'))
+    return FileResponse(os.path.join(STATIC_DIR, 'index.html'),
+                        headers={'Cache-Control': 'no-store'})
 
 
 # ── Camera stream (WebSocket) ────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ async def camera_ws(websocket: WebSocket):
                 if none_count == 1 or none_count % 30 == 0:
                     state = 'set' if camera_node else 'None'
                     log.warning(f'[WS] no frame available yet (camera_node={state}), count={none_count}')
-            await asyncio.sleep(1 / 30)
+            await asyncio.sleep(1 / 15)
     except WebSocketDisconnect:
         log.info(f'[WS] client disconnected: {client} after {sent} frames')
     except Exception:

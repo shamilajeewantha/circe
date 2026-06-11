@@ -58,6 +58,7 @@ info "MicroXRCEAgent running."
 info "Starting PX4 SITL + Gazebo (${WORLD_LABEL} world)..."
 cd "$PX4_DIR"
 [ -n "$GZ_WORLD" ] && export PX4_GZ_WORLD="$GZ_WORLD"
+export PX4_GZ_MODEL_POSE="-2,-2,0,0,0,0"
 make px4_sitl gz_x500 > /tmp/px4.log 2>&1 &
 PX4_PID=$!
 
