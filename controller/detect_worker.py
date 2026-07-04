@@ -32,7 +32,7 @@ while True:
 
     arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     boxes = []
-    for r in model(arr, verbose=False, conf=0.5, imgsz=1280):
+    for r in model(arr, verbose=False, conf=0.3, imgsz=1280):
         for box in r.boxes:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             boxes.append({
