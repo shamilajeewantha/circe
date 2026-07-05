@@ -13,7 +13,6 @@ Run with:  python gradio_app.py
 Then open the printed local URL in a browser.
 """
 
-import io
 import os
 import time
 import warnings
@@ -23,17 +22,21 @@ import warnings
 warnings.filterwarnings("ignore", message=".*HTTP_422_UNPROCESSABLE_ENTITY.*")
 
 import gradio as gr
-from PIL import Image
 
+from applog import get_logger
 from drone import Drone, NEUTRAL
-from video_stream import VideoReceiver
+from video_stream import VideoReceiver, MjpegServer
+
+log = get_logger("gradio_app")
 
 drone = Drone()
 video: VideoReceiver | None = None
+mjpeg: MjpegServer | None = None
 _log: list[str] = []
 
 
 def _note(msg: str) -> str:
+    log.info(msg)
     ts = time.strftime("%H:%M:%S")
     _log.append(f"[{ts}] {msg}")
     return "\n".join(_log[-12:])
@@ -51,6 +54,14 @@ def do_connect():
     drone.last_error = None
     try:
         drone.connect()
+        # Real app spends ~95% of a healthy video session disarmed/idle and
+        # switches to it within ~0.5s of connecting (see PROTOCOL_NOTES.md).
+        # Engage immediately here rather than waiting for a separate "Start
+        # Video" click — a live test showed the video stall had already
+        # locked in 2+ seconds before idle mode was applied that way, too
+        # late to matter. Movement commands auto-wake the drone (see
+        # _guarded), so flying still works normally.
+        drone.set_idle_mode(True)
         return _note(f"Connected — streaming controls to {drone.ip}:{drone.port}")
     except OSError as e:
         return _note(f"Connect failed: {e}")
@@ -68,35 +79,57 @@ def do_disconnect():
 # ── video ─────────────────────────────────────────────────────────────────
 
 def do_start_video(width, height, color):
-    global video
+    global video, mjpeg
     if not _connected():
-        return _note("Ignored 'Start video' — not connected. Click Connect first.")
+        return _note("Ignored 'Start video' — not connected. Click Connect first."), gr.update()
     if video is not None:
-        return _note("Video already running.")
+        return _note("Video already running."), gr.update()
+    # Real app spends ~95% of a healthy stream disarmed/idle (cmd=0, zero
+    # axes, frozen counter) — drone.py normally stays continuously armed
+    # forever, which every live test so far has stalled at ~7-12 frames on.
+    # See PROTOCOL_NOTES.md. Movement commands won't do anything until video
+    # is stopped (or you disconnect), since idle mode overrides the axes.
+    drone.set_idle_mode(True)
     video = VideoReceiver(drone.sock, drone.ip, drone.port,
                            width=int(width), height=int(height),
                            components=3 if color else 1)
     video.start()
+    # Push-based MJPEG stream, not client polling — see video_stream.py's
+    # MjpegServer docstring. Frame updates the instant one decodes.
+    mjpeg = MjpegServer(video)
+    try:
+        mjpeg.start()
+    except OSError as e:
+        video.stop()
+        video = None
+        mjpeg = None
+        return _note(f"Video started, but the MJPEG server failed to bind: {e}. "
+                      f"Try again in a moment (port may still be releasing)."), gr.update()
+    img_html = f'<img src="{mjpeg.url}" style="width:100%; border-radius:8px;">'
     return _note(
-        f"Video receiver started ({int(width)}x{int(height)}). "
-        f"Log: {video.logger._jsonl_path}"
-    )
+        f"Video receiver started ({int(width)}x{int(height)}), drone set to idle mode. "
+        f"MJPEG stream: {mjpeg.url}  Log: {video.logger._jsonl_path}"
+    ), img_html
 
 
 def do_stop_video():
-    global video
+    global video, mjpeg
     if video is None:
-        return _note("Video not running.")
+        return _note("Video not running."), gr.update()
+    if mjpeg is not None:
+        mjpeg.stop()
+        mjpeg = None
     video.stop()
     video = None
-    return _note("Video receiver stopped.")
+    drone.set_idle_mode(False)
+    return _note("Video receiver stopped, drone back to normal flight mode."), '<div id="video-box">🎥 Video feed not connected yet</div>'
 
 
-def poll_video():
+def poll_video_stats():
+    # Just the counters — the image itself is pushed live via MjpegServer,
+    # not polled here, so this only needs to run a few times a second.
     if video is None:
-        return None, "Video not running."
-    jpeg = video.latest_jpeg()
-    img = Image.open(io.BytesIO(jpeg)).convert("RGB") if jpeg else None
+        return "Video not running."
     stats = (
         f"pid={os.getpid()} packets={video.packets_seen} decoded_ok={video.frames_ok} "
         f"decode_failed={video.frames_failed} unknown_pkts={video.unknown_packets} "
@@ -104,7 +137,7 @@ def poll_video():
     )
     if video.last_error:
         stats += f" | last_decode_error={video.last_error}"
-    return img, stats
+    return stats
 
 
 _BADGE_CSS = "display:inline-block; padding:0.35em 0.9em; border-radius:999px; font-weight:700; margin-right:0.5em;"
@@ -142,6 +175,7 @@ def _guarded(fn, label, *args, **kwargs):
     if not _connected():
         reason = f" (lost connection: {drone.last_error})" if drone.last_error else ""
         return _note(f"Ignored '{label}' — not connected{reason}. Click Connect first.")
+    drone.set_idle_mode(False)  # any real flight command wakes the drone up
     fn(*args, **kwargs)
     return _note(label)
 
@@ -207,6 +241,7 @@ def do_turn_right(duration):
 def do_set_axes(roll, pitch, throttle, yaw):
     if not _connected():
         return _note("Ignored manual axis update — not connected.")
+    drone.set_idle_mode(False)
     drone.set_controls(roll=int(roll), pitch=int(pitch), throttle=int(throttle), yaw=int(yaw))
     return _note(f"Manual axes -> roll={roll} pitch={pitch} throttle={throttle} yaw={yaw}")
 
@@ -237,8 +272,9 @@ with gr.Blocks(title="DM002HW Drone Controller") as demo:
     with gr.Row():
         # ── video panel ────────────────────────────────────────────────────
         with gr.Column(scale=5):
-            video_feed = gr.Image(label="Video feed (experimental)", height=360,
-                                   show_label=True, elem_id="video-box")
+            video_feed = gr.HTML(
+                "<div id='video-box'>🎥 Video feed not connected yet</div>"
+            )
             with gr.Row():
                 start_video_btn = gr.Button("🎥 Start video")
                 stop_video_btn = gr.Button("Stop video")
@@ -341,10 +377,10 @@ with gr.Blocks(title="DM002HW Drone Controller") as demo:
         s.release(do_set_axes, inputs=[roll_s, pitch_s, throttle_s, yaw_s], outputs=status)
     center_btn.click(do_center_axes, outputs=[roll_s, pitch_s, throttle_s, yaw_s, status])
 
-    start_video_btn.click(do_start_video, inputs=[vid_w, vid_h, vid_color], outputs=status)
-    stop_video_btn.click(do_stop_video, outputs=status)
+    start_video_btn.click(do_start_video, inputs=[vid_w, vid_h, vid_color], outputs=[status, video_feed])
+    stop_video_btn.click(do_stop_video, outputs=[status, video_feed])
     video_timer = gr.Timer(0.4)
-    video_timer.tick(poll_video, outputs=[video_feed, video_stats])
+    video_timer.tick(poll_video_stats, outputs=video_stats)
     video_timer.tick(poll_status, outputs=status_badge)
 
 demo.queue()

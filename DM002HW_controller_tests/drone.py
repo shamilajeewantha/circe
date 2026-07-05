@@ -13,6 +13,10 @@ import socket
 import threading
 import time
 
+from applog import get_logger
+
+log = get_logger("drone")
+
 DRONE_IP   = "192.168.169.1"
 DRONE_PORT = 8800
 NEUTRAL    = 0x80   # 128
@@ -42,15 +46,26 @@ def _inner(roll, pitch, throttle, yaw, cmd):
     return bytes([0x66, roll, pitch, throttle, yaw, cmd, chk, 0x99])
 
 
-def _build(counter, roll, pitch, throttle, yaw, cmd, long=False):
+def _build(counter, roll, pitch, throttle, yaw, cmd, long=False, long_counter=None):
+    # long_counter drives the ctr2/ctr3 fields inside the "long" packet's
+    # suffix (bytes 88 and 108). Normally these are just counter+1/counter+2
+    # (kept as the default for backwards compatibility with existing flight
+    # behavior), but a real capture showed that during a healthy sustained
+    # video session, ctr1 (this function's `counter`) FREEZES while ctr2/ctr3
+    # keep incrementing independently at ~6.9Hz — decoupled entirely from
+    # ctr1. See PROTOCOL_NOTES.md. Pass long_counter explicitly to replicate
+    # that (see Drone._loop's idle-mode handling).
+    if long_counter is None:
+        long_counter = counter
     ctr1  = bytes([counter & 0xFF, (counter >> 8) & 0xFF])
     speed = bytes([0x00, 0x00, SPEED, 0x00])
     inner = _inner(roll, pitch, throttle, yaw, cmd)
     pad   = bytes(56)
     base  = (_HDR_124 if long else _HDR_88) + ctr1 + speed + inner + pad + _TAIL
     if long:
-        ctr2 = bytes([(counter+1) & 0xFF, ((counter+1) >> 8) & 0xFF])
-        ctr3 = bytes([(counter+2) & 0xFF, ((counter+2) >> 8) & 0xFF])
+        c2, c3 = long_counter + 1, long_counter + 2
+        ctr2 = bytes([c2 & 0xFF, (c2 >> 8) & 0xFF])
+        ctr3 = bytes([c3 & 0xFF, (c3 >> 8) & 0xFF])
         base += ctr2 + _CTR2_SFX + ctr3 + _CTR3_SFX
     return base  # 88 or 124 bytes
 
@@ -66,27 +81,62 @@ class Drone:
         self._yaw      = NEUTRAL
         self._cmd      = CMD_ARMED
         self._counter  = 0
+        self._long_counter = 0.0
+        self._last_long_tick = None
         self._running  = False
         self._thread   = None
         self._armed    = False
         self.last_error = None
+        self._idle_mode = False
+
+    def set_idle_mode(self, enabled: bool):
+        """Video-streaming aid: the real WiFi UAV app spends ~95% of a
+        healthy, sustained video session sending cmd=0 with all axes at
+        zero and a FROZEN packet counter (disarmed/idle) — it only sends
+        the continuous armed/neutral pattern this class normally sends
+        forever for about half a second right after connecting. Confirmed
+        from a real capture's control-channel bytes, see PROTOCOL_NOTES.md.
+        Movement commands have no effect while this is enabled — call
+        set_idle_mode(False) (or just fly normally) to resume flight."""
+        self._idle_mode = enabled
+
+    # Rate ctr2/ctr3 (bytes 88/108 of the "long" packet) advance at in a real
+    # healthy sustained-video capture — measured directly from newtest.pcapng:
+    # 17 increments over 2.461s = ~6.9 Hz. Confirmed to keep advancing even
+    # while ctr1 (the main counter) is frozen. See PROTOCOL_NOTES.md.
+    LONG_CTR_HZ = 6.9
 
     def _loop(self):
         while self._running:
             try:
+                if self._idle_mode:
+                    roll = pitch = throttle = yaw = 0
+                    cmd = 0
+                else:
+                    roll, pitch, throttle, yaw, cmd = self._roll, self._pitch, self._throttle, self._yaw, self._cmd
+
+                now = time.time()
+                if self._last_long_tick is None:
+                    self._last_long_tick = now
+                self._long_counter += (now - self._last_long_tick) * self.LONG_CTR_HZ
+                self._last_long_tick = now
+                long_ctr = int(self._long_counter)
+
                 # Alternate short / long packets exactly as the app does
-                self.sock.sendto(_build(self._counter, self._roll, self._pitch,
-                                        self._throttle, self._yaw, self._cmd,
+                self.sock.sendto(_build(self._counter, roll, pitch,
+                                        throttle, yaw, cmd,
                                         long=False), (self.ip, self.port))
-                self.sock.sendto(_build(self._counter, self._roll, self._pitch,
-                                        self._throttle, self._yaw, self._cmd,
-                                        long=True),  (self.ip, self.port))
+                self.sock.sendto(_build(self._counter, roll, pitch,
+                                        throttle, yaw, cmd,
+                                        long=True, long_counter=long_ctr),  (self.ip, self.port))
             except OSError as e:
                 self.last_error = str(e)
                 self._armed = False
-                print(f"[!] Control loop stopped — send failed: {e}")
+                self._running = False  # so disconnect()/reconnect logic sees this loop as stopped
+                log.error("Control loop stopped — send failed: %s", e)
                 break
-            self._counter += 1
+            if not self._idle_mode:
+                self._counter += 1
             time.sleep(0.02)   # 50 Hz
 
     def connect(self):
@@ -95,14 +145,27 @@ class Drone:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.last_error = None
 
+        # Real state-management bug found live 2026-07-05: none of these were
+        # ever reset here, only in __init__. A live capture (gradio_test3.pcapng)
+        # showed every reconnect within the same process carried over stale
+        # counter values from the previous session — ctr2/ctr3 in particular
+        # jumped to huge, discontinuous numbers (500+) instead of starting
+        # fresh at 1, which the one session that DID reset (by luck) proved
+        # was the difference between a stalled-at-7-frames session and a
+        # 258-frame, 37-second healthy stream. The real app always starts
+        # ctr1=0, ctr2=1 fresh on every connect — do the same here.
+        self._counter = 0
+        self._long_counter = 0.0
+        self._last_long_tick = None
+
         # Step 1: handshake
-        print("[*] Sending handshake...")
+        log.info("Sending handshake to %s:%s...", self.ip, self.port)
         for _ in range(5):
             self.sock.sendto(_HANDSHAKE, (self.ip, self.port))
             time.sleep(0.05)
 
         # Step 2: a few zero-control init packets (as the app does)
-        print("[*] Sending init packets...")
+        log.info("Sending init packets...")
         for i in range(6):
             self.sock.sendto(_build(i, 0,0,0,0,0, long=False), (self.ip, self.port))
             self.sock.sendto(_build(i, 0,0,0,0,0, long=True),  (self.ip, self.port))
@@ -113,15 +176,28 @@ class Drone:
         self._thread  = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         self._armed = True
-        print(f"[+] Connected — sending to {self.ip}:{self.port}")
+        log.info("Connected — sending to %s:%s", self.ip, self.port)
 
     def disconnect(self):
         self._running = False
         if self._thread:
             self._thread.join(timeout=1)
+            if self._thread.is_alive():
+                # Don't close the socket out from under a thread that's
+                # still using it — that's exactly the kind of race that
+                # can leave sockets/threads piling up across repeated
+                # connect/disconnect cycles. Wait longer instead of
+                # proceeding regardless.
+                log.warning("Control loop still running after 1s, waiting longer before closing socket...")
+                self._thread.join(timeout=3)
+                if self._thread.is_alive():
+                    log.error("Control loop did not stop — socket left open to avoid a use-after-close race. "
+                              "This connection may be in a bad state; consider restarting the app.")
+                    self._armed = False
+                    return
         self.sock.close()
         self._armed = False
-        print("[+] Disconnected")
+        log.info("Disconnected")
 
     # ── flight controls ───────────────────────────────────────────────────────
 
@@ -137,23 +213,23 @@ class Drone:
         self._cmd = CMD_ARMED
 
     def takeoff(self):
-        print("[*] Takeoff")
+        log.info("Takeoff")
         self._cmd = CMD_TAKEOFF
         time.sleep(0.5)
         self._cmd = CMD_ARMED
 
     def land(self):
-        print("[*] Land")
+        log.info("Land")
         self._cmd = CMD_LAND
         time.sleep(0.5)
         self._cmd = CMD_ARMED
 
     def stop(self):
-        print("[!] Emergency stop")
+        log.warning("Emergency stop")
         self._cmd = CMD_STOP
 
     def calibrate(self):
-        print("[*] Calibrating gyro (keep flat)...")
+        log.info("Calibrating gyro (keep flat)...")
         self._cmd = CMD_CALIBRATE
         time.sleep(1.0)
         self._cmd = CMD_ARMED
@@ -161,35 +237,35 @@ class Drone:
     # ── movements (duration in seconds) ──────────────────────────────────────
 
     def up(self, duration=1.0, power=180):
-        print(f"[>] Up        duration={duration}s  throttle={power}")
+        log.info("Up duration=%ss throttle=%s", duration, power)
         self.set_controls(throttle=power); time.sleep(duration); self.hover()
 
     def down(self, duration=1.0, power=80):
-        print(f"[>] Down      duration={duration}s  throttle={power}")
+        log.info("Down duration=%ss throttle=%s", duration, power)
         self.set_controls(throttle=power); time.sleep(duration); self.hover()
 
     def forward(self, duration=1.0, power=160):
-        print(f"[>] Forward   duration={duration}s  pitch={power}")
+        log.info("Forward duration=%ss pitch=%s", duration, power)
         self.set_controls(pitch=power); time.sleep(duration); self.hover()
 
     def backward(self, duration=1.0, power=96):
-        print(f"[>] Backward  duration={duration}s  pitch={power}")
+        log.info("Backward duration=%ss pitch=%s", duration, power)
         self.set_controls(pitch=power); time.sleep(duration); self.hover()
 
     def turn_left(self, duration=1.0, power=63):
-        print(f"[>] Turn left  duration={duration}s  yaw={power}")
+        log.info("Turn left duration=%ss yaw=%s", duration, power)
         self.set_controls(yaw=power); time.sleep(duration); self.hover()
 
     def turn_right(self, duration=1.0, power=191):
-        print(f"[>] Turn right duration={duration}s  yaw={power}")
+        log.info("Turn right duration=%ss yaw=%s", duration, power)
         self.set_controls(yaw=power); time.sleep(duration); self.hover()
 
     def move_left(self, duration=1.0, power=96):
-        print(f"[>] Move left  duration={duration}s  roll={power}")
+        log.info("Move left duration=%ss roll=%s", duration, power)
         self.set_controls(roll=power); time.sleep(duration); self.hover()
 
     def move_right(self, duration=1.0, power=160):
-        print(f"[>] Move right duration={duration}s  roll={power}")
+        log.info("Move right duration=%ss roll=%s", duration, power)
         self.set_controls(roll=power); time.sleep(duration); self.hover()
 
 

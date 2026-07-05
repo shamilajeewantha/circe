@@ -15,10 +15,9 @@ drone_packets.txt
 *.pcapng
 *.pcap.gz
 
-# Throwaway scripts used during protocol discovery
-port_probe.py
-tcp_scan.py
-discover.py
-parse_pcap.py
-analyze_capture.py
-dump_drone_packets.py
+# pcap_analyzer.py decode-frame output — generated, not source
+DM002HW_controller_tests/decoded_frame_*.png
+DM002HW_controller_tests/video_debug/
+
+# applog.py runtime log file — generated, not source
+DM002HW_controller_tests/app_logs/

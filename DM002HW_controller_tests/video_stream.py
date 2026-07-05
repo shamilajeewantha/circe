@@ -277,6 +277,8 @@ class VideoReceiver:
         self._buffers: dict[int, _FrameBuffer] = {}
         self._latest_frame_bytes: Optional[bytes] = None
         self._latest_lock = threading.Lock()
+        self._frame_ready = threading.Condition(self._latest_lock)
+        self._frame_version = 0
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._watchdog_thread: Optional[threading.Thread] = None
@@ -332,6 +334,17 @@ class VideoReceiver:
     def latest_jpeg(self) -> Optional[bytes]:
         with self._latest_lock:
             return self._latest_frame_bytes
+
+    def wait_for_next_frame(self, after_version: int, timeout: float = 5.0):
+        """Block until a frame newer than `after_version` is available (or
+        `timeout` elapses), then return (jpeg_bytes, new_version). True
+        push/wake-on-arrival — no fixed-interval polling. Used by the MJPEG
+        HTTP server below; `after_version` should be whatever version was
+        last returned, starting at 0."""
+        with self._frame_ready:
+            if self._frame_version == after_version:
+                self._frame_ready.wait(timeout=timeout)
+            return self._latest_frame_bytes, self._frame_version
 
     # ── stall recovery: "kick" packets, not per-frame acks ──────────────
 
@@ -464,8 +477,10 @@ class VideoReceiver:
             Image.open(io.BytesIO(jpeg_bytes)).load()
             self.frames_ok += 1
             self.last_decoded_ts = time.time()
-            with self._latest_lock:
+            with self._frame_ready:
                 self._latest_frame_bytes = jpeg_bytes
+                self._frame_version += 1
+                self._frame_ready.notify_all()
             self.logger.log({"event": "frame_decoded_ok", "frame_id": frame_id, "size": len(jpeg_bytes)})
             self.logger.save_frame(jpeg_bytes, "ok")
         except Exception as e:  # noqa: BLE001 - want to survive any decode failure
@@ -474,3 +489,109 @@ class VideoReceiver:
             self.logger.log({"event": "frame_decode_failed", "frame_id": frame_id,
                               "size": len(jpeg_bytes), "error": str(e)})
             self.logger.save_frame(jpeg_bytes, "err")
+
+
+# ── MJPEG-over-HTTP server ──────────────────────────────────────────────────
+#
+# The drone's own protocol is proprietary (no RTSP/SRT/RTP — just raw UDP
+# JPEG fragments, see PROTOCOL_NOTES.md), but once reassembled it's simply a
+# sequence of independent JPEG images — i.e. exactly what MJPEG-over-HTTP
+# (multipart/x-mixed-replace) was designed for. This is the decades-old
+# "IP camera" trick: keep one HTTP connection open per viewer and push each
+# new frame down it the instant it's ready. A plain <img src="..."> tag then
+# repaints itself automatically — no client-side polling, no WebRTC stack,
+# no video-chunk encoding. Pairs with VideoReceiver.wait_for_next_frame,
+# which blocks (no fixed-interval loop) until a genuinely new frame exists.
+
+import http.server
+import socketserver
+
+
+class _MjpegHandler(http.server.BaseHTTPRequestHandler):
+    receiver: "VideoReceiver" = None  # set via server instance below
+
+    def log_message(self, fmt, *args):
+        pass  # keep console clean; PacketLogger already logs what matters
+
+    def do_GET(self):
+        if self.path != "/stream":
+            self.send_response(404)
+            self.end_headers()
+            return
+        boundary = "frame"
+        self.send_response(200)
+        self.send_header("Age", "0")
+        self.send_header("Cache-Control", "no-cache, private")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={boundary}")
+        self.end_headers()
+        receiver = self.server.receiver
+        version = 0
+        try:
+            # Poll self.server.active every ~1s via the wait timeout so this
+            # thread notices Stop Video promptly instead of lingering for
+            # up to 5s (or indefinitely) after the server's been told to
+            # stop — daemon_threads=True only reaps threads at process exit,
+            # NOT when stop()/shutdown() is called while the app keeps running.
+            while self.server.active:
+                jpeg, version = receiver.wait_for_next_frame(version, timeout=1.0)
+                if jpeg is None:
+                    continue
+                self.wfile.write(f"--{boundary}\r\n".encode())
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(jpeg)}\r\n\r\n".encode())
+                self.wfile.write(jpeg)
+                self.wfile.write(b"\r\n")
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # viewer closed the tab / connection dropped — expected
+
+
+class _ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
+    # Without this, Windows/TCP holds the port briefly after stop(), so
+    # restarting the server on the same port right away (Stop Video then
+    # Start Video again) fails to bind — this was a real bug, not a
+    # theoretical one: it's exactly what made "stop then start again" break
+    # every time. allow_reuse_address maps to SO_REUSEADDR, set before bind.
+    allow_reuse_address = True
+
+
+class MjpegServer:
+    """Threaded HTTP server exposing VideoReceiver's frames at /stream as a
+    push-based MJPEG multipart stream. One thread per connected viewer;
+    fine for this use case (one browser tab watching one drone)."""
+
+    def __init__(self, receiver: "VideoReceiver", host: str = "127.0.0.1", port: int = 8090):
+        self.receiver = receiver
+        self.host = host
+        self.port = port
+        self._httpd: Optional[socketserver.ThreadingTCPServer] = None
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self):
+        if self._httpd is not None:
+            return
+        handler = type("_BoundMjpegHandler", (_MjpegHandler,), {})
+        # daemon_threads=True only reaps per-connection handler threads at
+        # process exit, not when stop() is called mid-run — the handler's
+        # own `while self.server.active` loop (above) is what makes old
+        # connections actually let go promptly within a running process.
+        self._httpd = _ReusableThreadingTCPServer((self.host, self.port), handler)
+        self._httpd.daemon_threads = True
+        self._httpd.receiver = self.receiver
+        self._httpd.active = True
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._httpd is not None:
+            self._httpd.active = False  # signals any in-flight handler threads to exit
+            self._httpd.shutdown()
+            self._httpd.server_close()
+            self._httpd = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}/stream"

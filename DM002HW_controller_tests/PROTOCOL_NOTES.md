@@ -5,6 +5,45 @@ Drone: DM002HW DIY WiFi+camera quad. AP at `192.168.169.1`, client gets
 (see `analyze_capture.py` / `capture_analysis.txt` / `dump_drone_packets.py`).
 That capture appears to have been shot at night (most frames decode near-black).
 
+## Current status (read this first — the rest of this file is a chronological
+## record of how we got here, including dead ends; this section is the answer)
+
+- **Control (fly the drone)**: confirmed working, has been the whole time.
+  `drone.py`, no open issues.
+- **Video streaming**: **confirmed working live** — a real session
+  (`gradio_test3.pcapng`) streamed 258 frames continuously over 37.7
+  seconds, plus several more good runs in the same session. The fix that
+  got it there: `Drone.set_idle_mode()` (disarmed/idle state matching the
+  real app, not continuously armed) + decoupling the `ctr2`/`ctr3` counter
+  fields from the main counter (they must keep advancing at ~6.9Hz even
+  while the main counter freezes) + resetting all counter state at the top
+  of every `connect()` (not just `__init__`, which was silently breaking
+  every reconnect within the same process). See "CONTROL-CHANNEL FINDING"
+  and "ctr2/ctr3 decoupling" sections below for the evidence.
+  - Ignore the "FREE-RUNNING stream ... recovered by a 'kick'" section
+    below — that was a real hypothesis, live-tested, and **disproven** (see
+    "Live-tested and disproven hypotheses"). It's kept for the record, not
+    because it's the current answer.
+- **Video display in the Gradio UI**: rewritten from polling (`gr.Image` +
+  `gr.Timer`, capped at 2.5fps, dropped most frames) to push-based
+  MJPEG-over-HTTP (`video_stream.MjpegServer` + an `<img>` tag). Verified
+  end-to-end **offline** with a real HTTP client against real captured
+  frame data — **not yet confirmed live in a browser against the actual
+  drone.**
+- **Reconnect robustness**: fixed a port-rebind bug (Stop→Start Video
+  failing) and a use-after-close socket race (`WinError 10055` after
+  several connect/disconnect cycles). Both verified via simulated
+  reconnect cycles **offline** — **not yet confirmed live.**
+- **Logging**: `applog.py` added, writes `app_logs/app.log` (rotating,
+  persists across runs). Verified working.
+
+**What still needs a live drone to confirm**: the video-display rewrite and
+the reconnect-robustness fixes, ideally all exercised together in one
+session (Connect → Start Video → confirm smooth-ish display → Stop → Start
+again → confirm it still works → a few Disconnect/Connect cycles). If
+anything breaks, `app_logs/app.log` and `video_debug/sessions/*.jsonl` will
+have it — no need to paste console output back manually anymore.
+
 ## Control channel — CONFIRMED WORKING (`drone.py`)
 
 - UDP to `192.168.169.1:8800`.
@@ -309,6 +348,277 @@ protocol bug. The Gradio page header also shows the current process's PID.
 5. Check `tasklist`/`netstat` (Windows) for more than one process bound to
    this app before assuming it's a protocol bug — see the `pid` note above.
 
+## Getting a fresh packet capture (correct method)
+
+The phone (running the real WiFi UAV app) and this laptop are different
+devices — standard Wireshark-on-Windows can't see the phone's traffic to the
+drone unless routed through something the laptop can see. The method that
+actually works, confirmed 2026-07-05 (produced `newtest.pcapng`):
+
+```
+Phone ──WiFi──> Laptop (Mobile Hotspot)
+                     |
+                Windows routes/NATs
+                     |
+                Laptop (WiFi) ──WiFi──> Drone
+```
+
+The **drone stays exactly as-is** (its own AP, laptop connects to it
+normally as a client — same as every other capture in this file). The
+**laptop** does double duty: connected to the drone on its WiFi radio, and
+broadcasting a *separate* hotspot for the phone to join, with Windows
+routing between the two.
+
+Steps:
+1. Laptop WiFi connects to the drone's own hotspot (as always — verify with
+   `ping 192.168.169.1`).
+2. **Do NOT use the modern Settings → Mobile Hotspot toggle for this** — it
+   silently refuses to share a connection Windows doesn't think has "real"
+   internet (which the drone's network doesn't), even though the option may
+   appear selectable. Use the classic `netsh` / Network Connections method
+   instead:
+   - Confirm hosted-network support: `netsh wlan show drivers` (look for
+     "Hosted network supported: Yes").
+   - `netsh wlan set hostednetwork mode=allow ssid=<name> key=<password>`
+   - `netsh wlan start hostednetwork`
+   - Open Network Connections (`ncpa.cpl`), right-click the WiFi adapter
+     connected to the drone → Properties → Sharing tab → check "Allow other
+     network users to connect..." → select the new hosted-network virtual
+     adapter as the connection to share to.
+3. Connect the phone to the new hosted-network SSID (not the drone's own).
+4. Wireshark on the laptop, capture on the **WiFi** adapter (the one
+   connected to the drone), filter `udp and ip.addr == 192.168.169.1`.
+5. Use the real app on the phone normally — traffic is transparently NAT'd
+   through, so captured packets show `192.168.169.1 <-> 192.168.169.2`(the
+   laptop's own address on the drone's network, since NAT rewrites the
+   phone's traffic to appear as coming from the laptop).
+
+### `newtest.pcapng` findings (2026-07-05) — proof continuous streaming works
+
+This capture (produced with the method above) shows **two genuinely
+continuous, healthy video streams**, no protocol trick needed on the app's
+part beyond normal operation:
+- 38 frames over ~4.9s at the very start of the capture (already in
+  progress when the capture began — frame_ids 154-191).
+- After a ~5.3s gap (the app was reloaded — "loaded video twice"), a *new*
+  session starts fresh at frame_id 1 and streams **95 frames continuously
+  over 13.2 seconds** (~7.2 fps, no gaps over 0.3s).
+
+This is dramatically better than anything achieved by our own
+reimplementation so far (which has never exceeded ~12 frames before
+stalling permanently, across every live test). Both the per-frame-ack
+hypothesis and the `ef 20`-kick hypothesis were tested directly against the
+live drone and disproven (see below).
+
+### CONTROL-CHANNEL FINDING (2026-07-05) — the real app is DISARMED during sustained video, ours never is
+
+Ran `pcap_analyzer.py control newtest.pcapng` (after fixing a stale-offset
+bug the tool inherited from old `dump_drone_packets.py` — inner control
+block is at offset 18, not 20; verified against `drone.py`'s own
+`_build()` output before trusting the capture numbers). Result, decoding
+roll/pitch/throttle/yaw/cmd/checksum from every client→8800 packet:
+
+- **430 of 453** control packets in this capture — essentially the *entire*
+  13-second healthy streaming window, including the very first packets of
+  the file (the already-in-progress tail-end session) — have
+  **roll=pitch=throttle=yaw=0, cmd=0, checksum=0**, with the packet
+  **counter frozen at a constant value (11)**, never incrementing.
+- Only **14 packets**, right after the `ef 00 04 00` reconnect handshake,
+  show the "armed/neutral" values we assumed were the steady state:
+  `roll=pitch=throttle=yaw=128, cmd=0x40, chk=0x40` (exactly what
+  `drone.py` sends) — and the counter *does* increment normally (1,2,3...)
+  during this brief window, for about 10 packets / ~0.5 seconds, before
+  switching to the frozen all-zero state for the rest of the session.
+
+**`drone.py`'s control loop does the opposite of what the healthy capture
+shows**: it sends `cmd=CMD_ARMED` (0x40) with neutral (128) axes
+*continuously, forever*, incrementing the counter every packet, 50 times a
+second — i.e. it stays in the brief "armed" state the real app only uses
+for half a second, and never reaches the frozen all-zero "idle/disarmed"
+state the real app spends 95% of its time in during healthy streaming.
+
+**This is the most concrete, testable lead so far** — the pattern is 100%
+consistent within this capture (not just correlated with one event), and
+gives a specific, mechanical hypothesis: sending `cmd=0` (disarmed) with
+frozen/zero axes after the initial connect sequence, instead of
+continuously re-sending `cmd=CMD_ARMED`, might be what actually lets the
+drone's firmware sustain video encoding — perhaps continuous "armed" state
+competes with the video pipeline for some shared resource, or the firmware
+treats sustained-armed-with-no-throttle-change as some kind of degraded/
+watchdog condition that (among other things) throttles the encoder.
+
+**Implemented as `Drone.set_idle_mode(bool)` in `drone.py`** — additive, opt-in
+(default off, existing flight behavior unchanged unless explicitly enabled).
+When on, `_loop()` sends `cmd=0`/all-zero axes and freezes the packet
+counter, matching the healthy-capture pattern exactly.
+
+**First attempt (`gradio_test.pcapng`, 2026-07-05) — engaged too late,
+inconclusive.** `gradio_app.py` originally only called `set_idle_mode(True)`
+from the "Start Video" button. A live test (captured in `gradio_test.pcapng`)
+showed: idle mode *did* engage correctly (1583 of 1820 control packets were
+the idle pattern, vs 198 armed — confirmed via `pcap_analyzer.py control`),
+but video had already stalled (last frame at t=4.0s) **over 2 seconds
+before** idle mode was even applied (t=6.06s, when Start Video was actually
+clicked). So this test doesn't confirm or deny the hypothesis — idle mode
+was never active during the window that mattered.
+
+**Root cause of the gap**: in the real app, connecting and going idle
+happen together, within ~0.5s. In the Gradio UI, "Connect" and "Start Video"
+are two separate manual clicks with an arbitrary delay between them — by
+the time idle mode engaged, the stall may have already locked in.
+
+**Fixed 2026-07-05**: `do_connect()` in `gradio_app.py` now calls
+`drone.set_idle_mode(True)` immediately upon connecting, not waiting for
+Start Video — closing the timing gap to match the real app. Since idle mode
+overrides axes to zero unconditionally, every flight command (`_guarded`
+wrapper, plus the manual axis panel's `do_set_axes`) now calls
+`set_idle_mode(False)` first, so flying still works normally — idle mode
+only stays engaged if you never touch the controls, exactly like the real
+app only being "armed" while a joystick is actively touched.
+
+This timing fix was tested live (`gradio_test2.pcapng`) — still stalled at 7
+frames. But that same test surfaced the strongest lead of the whole session:
+
+### `ctr2`/`ctr3` decoupling — likely the actual missing keepalive (2026-07-05)
+
+Byte-position variance analysis (`bytelevel_diff.py` — compare every byte
+position across all same-length control packets, not just the
+roll/pitch/throttle/yaw/cmd columns already tracked) found something
+completely missed until now: in the **124-byte "long" packet**, bytes
+88-89 and 108-109 (`ctr2`/`ctr3`, part of the packet's tail suffix blocks)
+**keep incrementing throughout the entire healthy 13-second stream in
+`newtest.pcapng`, even while the main counter (`ctr1`, bytes 12-13) is
+completely frozen at 11.** Precisely measured: 17 increments over 2.461s =
+**~6.9 Hz** — suspiciously close to the ~7.2fps video frame rate in that
+same window.
+
+In our own captures (`gradio_test.pcapng`, `gradio_test2.pcapng`), `ctr2`/
+`ctr3` barely move (1-6 total) because `drone.py`'s `_build()` always
+derived them as `counter+1`/`counter+2` from the SAME counter used for
+`ctr1` — so freezing `ctr1` for idle mode also froze `ctr2`/`ctr3`, which
+the real app evidently does NOT do. This looks exactly like a per-frame
+(or near-per-frame) client-side "still alive, still consuming" counter,
+separate from the main control-state counter — plausibly what the drone's
+firmware uses as proof the client hasn't gone away, independent of whether
+the client is actively flying.
+
+**Implemented**: `_build()` now takes an optional `long_counter` parameter
+(defaults to old behavior — `counter+1`/`counter+2` — for backwards
+compatibility). `Drone._loop()` maintains a new `self._long_counter` that
+advances continuously at the measured 6.9 Hz using wall-clock elapsed time,
+**regardless of idle_mode** (unlike `self._counter`/`ctr1`, which only
+freezes during idle) — and passes it into the "long" packet build. Verified
+the byte-level output is correct (`ctr1` frozen, `ctr2`/`ctr3` independently
+advancing) and that the rate tracks real elapsed time correctly, both
+without a live drone.
+
+### CONFIRMED WORKING LIVE, then a state-management bug found (2026-07-05, `gradio_test3.pcapng`)
+
+The idle-mode + decoupled-ctr2/ctr3 fix **worked** — a 168-second capture
+of a real Gradio session shows one continuous run of **258 distinct video
+frames over 37.7 seconds** (port 50768), and the app's own
+`video_debug/sessions/` logs show several more successful runs within the
+same process (524, 273, 124, 118 `frame_decoded_ok` events across separate
+Start-Video clicks) — a huge, unambiguous improvement over the ~7-frame
+ceiling every previous attempt hit.
+
+But: reconnecting within the same running process (Disconnect → Connect →
+Start Video again, without relaunching `python gradio_app.py`) intermittently
+failed again, only reliably fixed by a full relaunch. Root cause, found by
+comparing `ctr1`/`ctr2`/`ctr3` at the start of all 7 reconnect attempts in
+the capture: **`Drone.connect()` never reset `self._counter`,
+`self._long_counter`, or `self._last_long_tick`** — only `__init__` did. So
+every reconnect within the same process carried over stale state from the
+previous session. The symptom was stark: every *failed* reconnect showed
+`ctr2` jump to a huge, discontinuous value (561, 752, 838, 977, 1050, 268)
+right at session start, while the one session that happened to get a clean
+reset (`ctr2=1`, matching what the real app always does on every connect)
+was the 258-frame success. **Fixed**: `connect()` now explicitly resets all
+three at the top, so every connect — not just process startup — starts
+fresh exactly like the real app does.
+
+**Not yet re-tested live since this reset fix landed.** Next test: several
+Disconnect → Connect → Start Video cycles *within the same running process*
+(no relaunch), checking that every cycle now streams well, not just the
+first.
+
+**Also worth adding later** (separate, lower-priority issue): fragment-level
+retry for lossy WiFi — currently a single dropped fragment discards the
+whole frame with no re-request, which would lower effective frame rate on a
+noisy link. Doesn't explain the reconnect-state bug above, but would likely
+improve overall frame rate/consistency once the state bug is confirmed
+fixed.
+
+### Live-tested and disproven hypotheses (2026-07-05)
+
+Both were implemented in `video_stream.py`, tested directly against the
+real drone (not just inferred from capture timing), and removed/reverted
+after failing:
+1. **Per-frame ACK/request** (ported from turbodrone): sent a
+   `build_native_ack_packet`-style ACK after every completed frame,
+   requesting the next one. Result: still stalled at ~6-8 frames every
+   time, identical to no-ack behavior.
+2. **`ef 20` kick on stall**: resent the exact captured wake triplet after
+   2s of silence, escalating to a full handshake resend after 8s. Result:
+   drone dutifully echoes an `info_packet` in response every time (proving
+   it's received) but **never** resumes sending video fragments, even after
+   25+ seconds and multiple escalating attempts.
+3. **Missing 108-byte control packet type**: found via `pcap_analyzer.py
+   control` that the real app also sends a third control-packet size (108
+   bytes, header byte 8 = `0x01`) that `drone.py` never generates. Added it
+   live (best-effort field reconstruction) alongside the normal 88/124-byte
+   packets. Result: no change — still stalled at frame 7.
+
+Also ruled out: WiFi signal quality (checked via `netsh wlan show
+interfaces` during a live test — 100% signal, RSSI -35dBm, i.e. excellent;
+not a link-quality issue).
+
+## Analysis tools
+
+All scripts below are tracked in git (not gitignored) specifically so a
+future session can reproduce this analysis without redoing the RE work.
+Raw capture files (`*.pcap`, `*.pcapng`) stay gitignored (potentially
+sensitive traffic) — only the *tools* are tracked.
+
+- **`pcap_analyzer.py`** — the main, consolidated, actively-maintained
+  analyzer built during the 2026-07-05 session. Run
+  `python pcap_analyzer.py <mode> [path.pcapng]`:
+  - `summary` — flow overview (every UDP/TCP src/dst/port pair + packet
+    counts). Good first look at an unfamiliar capture.
+  - `control` — dumps every client→8800 control packet with decoded
+    roll/pitch/throttle/yaw/cmd columns, flagging non-neutral rows (real
+    flight commands) and any non-`ef 02` packets (handshake/wake/etc).
+  - `video` — **the primary tool for video debugging.** Merges frame
+    completions (with gap detection >0.3s) and every info/handshake/wake
+    packet into one real-timestamp-ordered timeline, so you can see exactly
+    what the client was sending around any stall or resume. This replaces
+    all the ad-hoc one-off scripts written earlier in the session (properly
+    handles multi-section pcapng files — see its docstring for a real
+    timestamp bug this fixed).
+  - `decode-frame N` — reassembles and decodes frame N via
+    `video_stream.py`'s real pipeline, saves it as a PNG. Use to visually
+    confirm a capture has real (not corrupted) video, or inspect a specific
+    frame.
+- **`analyze_capture.py`** — original first-pass flow dumper (groups all
+  UDP/TCP flows, shows first 15 unique payloads per flow as hex). Superseded
+  by `pcap_analyzer.py summary` for most uses but kept since
+  `capture_analysis.txt` in this repo was generated by it and other notes
+  reference its exact output format.
+- **`dump_drone_packets.py`** — earlier, narrower version of
+  `pcap_analyzer.py control` (control-channel-only, writes to
+  `drone_packets.txt`). Kept for the same reason as above.
+- **`discover.py`** — sends the known handshake and listens on a list of
+  candidate UDP ports for any response/broadcast. Useful if reverse-engineering
+  a *different* drone/firmware from scratch and you don't yet know which
+  port(s) it uses.
+- **`port_probe.py`** — sends a neutral control packet to a wider list of
+  candidate ports and checks for replies. Same "starting from zero" use case
+  as `discover.py`.
+- **`tcp_scan.py`** — plain TCP port scan (1-10000) of the drone's IP.
+  Useful for checking whether a drone/firmware variant exposes any TCP
+  service (e.g. a web config UI, RTSP) in addition to the UDP control/video
+  ports this one uses.
+
 ## `gradio_app.py`
 
 Gradio 6 UI on top of `drone.py` + `video_stream.py`. Run with
@@ -320,5 +630,82 @@ the background send-loop in `Drone._loop` just keeps re-transmitting
 whatever the current axis values are, leaving a slider at a non-neutral
 position is equivalent to holding a real stick there (continuous
 hover/movement, not just a timed tap). The video panel has Start/Stop
-buttons and Width/Height/Color fields, polled every 0.4s via `gr.Timer`, and
-shows live packet/frame/kick/handshake-resend counters plus the process PID.
+buttons and Width/Height/Color fields; the stats line (packet/frame/kick/
+handshake-resend counters + PID) is still polled every 0.4s via `gr.Timer`,
+but the video image itself is NOT polled — see below.
+
+### Video display: MJPEG-over-HTTP push, not polling (2026-07-05)
+
+Originally the video panel was a `gr.Image` updated by the same 0.4s
+`gr.Timer` used for stats — this capped the displayed rate at 2.5fps and
+silently dropped most successfully-decoded frames even when the underlying
+stream was healthy (confirmed: a 6.8-7fps stream means most frames arrive
+and get overwritten between one 0.4s poll and the next). Replaced with:
+
+- `video_stream.py`'s `VideoReceiver` now has a `threading.Condition`
+  (`_frame_ready`) + `wait_for_next_frame(after_version, timeout)` that
+  blocks until a genuinely new frame exists — no fixed-interval loop.
+- `video_stream.MjpegServer` — a small threaded HTTP server (stdlib
+  `http.server`/`socketserver` only) exposing `/stream` as
+  `multipart/x-mixed-replace` (the decades-old "IP camera" MJPEG-over-HTTP
+  trick). Each connected viewer gets its own thread that blocks on
+  `wait_for_next_frame` and pushes each new JPEG down the open connection
+  the instant it's ready.
+- The Gradio video panel is now a `gr.HTML` `<img src="http://127.0.0.1:8090/stream">`
+  tag — the browser repaints on its own via the open HTTP connection, no
+  Gradio-side polling/serialization/websocket round-trip per frame at all.
+
+Verified end-to-end offline: fed real captured fragments from
+`wireshark_1.pcapng` into a `VideoReceiver` on a background thread, started
+an `MjpegServer`, and had a real `urllib` HTTP client read the multipart
+stream — received valid JPEGs (correct SOI/EOI markers) matching the
+source data.
+
+**Why not WebRTC or `gr.Video(streaming=True)`**: both exist in Gradio 6
+(the latter added in 5.0, chunk-based h.264/mp4; WebRTC via the separate
+`fastrtc`/`gradio-webrtc` packages) and would work, but MJPEG-over-HTTP
+needed zero new dependencies, no video-chunk encoding step, and is a much
+smaller change for what's fundamentally just "push each already-decoded
+JPEG out immediately" — the actual protocol from the drone was never
+video in the RTSP/SRT/RTP sense to begin with, just a raw UDP JPEG-fragment
+scheme (see the video channel section above), so treating the final output
+as MJPEG matches what it actually is.
+
+### Two real bugs found right after shipping the above (2026-07-05)
+
+1. **`MjpegServer` couldn't restart on the same port.** `Stop Video` then
+   `Start Video` again failed because `socketserver.ThreadingTCPServer`
+   doesn't set `SO_REUSEADDR` by default — Windows briefly holds a just-closed
+   port, so rebinding immediately after `stop()` raised `OSError`
+   (uncaught, silent failure from the user's point of view). Fixed: a
+   `_ReusableThreadingTCPServer` subclass with `allow_reuse_address = True`,
+   plus `do_start_video` now catches bind failures and reports them in the
+   status log instead of crashing silently. Also fixed: `daemon_threads=True`
+   only reaps per-connection handler threads at process exit, not when
+   `stop()` is called mid-run — added a `server.active` flag the handler's
+   streaming loop checks every ~1s so old connections let go promptly
+   instead of lingering.
+2. **`WinError 10055` (socket buffer space exhausted) after several
+   connect/disconnect cycles.** `Drone.disconnect()` closed the socket after
+   waiting only up to 1s for the control thread to stop, regardless of
+   whether it actually had — a real use-after-close race that could leave
+   threads/sockets piling up across cycles. Hardened: now waits longer and
+   verifies the thread actually stopped before closing the socket, logging
+   clearly if it doesn't (rather than silently proceeding). Also fixed a gap
+   where the thread's own `OSError` handler broke its loop but never cleared
+   `self._running`, leaving `disconnect()`'s bookkeeping inconsistent.
+
+### Proper logging added (2026-07-05)
+
+Everything above was previously diagnosed purely from console `print()`
+output the user had to copy-paste back — nothing was ever saved to disk for
+non-video events (only `video_debug/sessions/*.jsonl` persisted). Added
+`applog.py`: stdlib `logging` (no new dependency), one shared rotating file
+`app_logs/app.log` (5MB x 5 backups, appends across runs — same "never
+delete automatically" policy as `video_debug/`) plus console output, used by
+`drone.py` (replacing its class-method `print()` calls — the
+`if __name__ == "__main__":` demo block's prints were left alone, that's an
+interactive CLI example, not part of the app) and `gradio_app.py` (`_note()`,
+already called for every UI status message, now logs each one too — so
+every connect/disconnect/video-start/error is captured with a real
+timestamp automatically, with no per-call-site duplication needed).
