@@ -69,20 +69,32 @@ class Drone:
         self._running  = False
         self._thread   = None
         self._armed    = False
+        self.last_error = None
 
     def _loop(self):
         while self._running:
-            # Alternate short / long packets exactly as the app does
-            self.sock.sendto(_build(self._counter, self._roll, self._pitch,
-                                    self._throttle, self._yaw, self._cmd,
-                                    long=False), (self.ip, self.port))
-            self.sock.sendto(_build(self._counter, self._roll, self._pitch,
-                                    self._throttle, self._yaw, self._cmd,
-                                    long=True),  (self.ip, self.port))
+            try:
+                # Alternate short / long packets exactly as the app does
+                self.sock.sendto(_build(self._counter, self._roll, self._pitch,
+                                        self._throttle, self._yaw, self._cmd,
+                                        long=False), (self.ip, self.port))
+                self.sock.sendto(_build(self._counter, self._roll, self._pitch,
+                                        self._throttle, self._yaw, self._cmd,
+                                        long=True),  (self.ip, self.port))
+            except OSError as e:
+                self.last_error = str(e)
+                self._armed = False
+                print(f"[!] Control loop stopped — send failed: {e}")
+                break
             self._counter += 1
             time.sleep(0.02)   # 50 Hz
 
     def connect(self):
+        # A previous disconnect() closed the old socket — always start fresh
+        # so reconnecting after a disconnect doesn't send/recv on a dead fd.
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.last_error = None
+
         # Step 1: handshake
         print("[*] Sending handshake...")
         for _ in range(5):
@@ -108,6 +120,7 @@ class Drone:
         if self._thread:
             self._thread.join(timeout=1)
         self.sock.close()
+        self._armed = False
         print("[+] Disconnected")
 
     # ── flight controls ───────────────────────────────────────────────────────
