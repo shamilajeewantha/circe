@@ -268,6 +268,14 @@
       <!-- Arm -->
       <button class="btn btn-arm" id="btn-arm" title="Arm drone and engage offboard mode">ARM / OFFBOARD</button>
 
+      <button id="btn-servo" onclick="toggleServo()"
+        style="width:100%;margin-top:8px;padding:8px;border-radius:6px;cursor:pointer;
+               font-size:12px;letter-spacing:1px;text-transform:uppercase;
+               background:#1a2e1a;border:1px solid #4caf50;color:#a5d6a7;">
+        &#9678; VISUAL SERVO
+      </button>
+      <div id="servo-status" class="hint" style="margin-top:4px;min-height:16px;"></div>
+
       <div id="drone-statusbar" class="hint" style="margin-top:8px;">checking...</div>
 
       <div class="hint">
@@ -355,6 +363,27 @@
   </div>
 
 </div><!-- end layout -->
+
+<!-- ── Visual Servo algorithm panel ─────────────────────────────────────────── -->
+<div id="servo-viz-panel" style="display:none;margin:12px 0;padding:12px;
+     background:#111d2e;border:1px solid #1e3a5f;border-radius:8px;">
+  <div class="panel-title" style="margin-bottom:8px;">Visual Servo — Live Algorithm State</div>
+  <div style="display:flex;gap:10px;margin-bottom:8px;">
+    <div style="flex:1;">
+      <div style="font-size:11px;color:#7eb8f7;margin-bottom:3px;">Pixel Error |e| (px)</div>
+      <canvas id="chart-error" height="80"
+        style="width:100%;display:block;background:#0d1b2e;border-radius:4px;"></canvas>
+    </div>
+    <div style="flex:1;">
+      <div style="font-size:11px;color:#7eb8f7;margin-bottom:3px;">&#952;&#770; estimate (f/Z)</div>
+      <canvas id="chart-theta" height="80"
+        style="width:100%;display:block;background:#0d1b2e;border-radius:4px;"></canvas>
+    </div>
+  </div>
+  <div id="servo-log"
+    style="font-family:monospace;font-size:11px;color:#a5d6a7;background:#0d1b2e;
+           border-radius:4px;padding:6px 8px;height:80px;overflow-y:auto;white-space:pre;"></div>
+</div>
 
 <div id="statusbar"></div>
 
@@ -645,6 +674,117 @@ async function pollStatus() {
 
 setInterval(pollStatus, 1000);
 pollStatus();
+
+// ── visual servo ─────────────────────────────────────────────────────────────────
+
+let _servoActive = false;
+
+function _setServoBtn(active) {
+  const btn = document.getElementById('btn-servo');
+  if (active) {
+    btn.textContent = '⏹ STOP SERVO';
+    btn.style.background   = '#2e1a1a';
+    btn.style.borderColor  = '#ef5350';
+    btn.style.color        = '#ffcdd2';
+  } else {
+    btn.textContent = '⊙ VISUAL SERVO';
+    btn.style.background   = '#1a2e1a';
+    btn.style.borderColor  = '#4caf50';
+    btn.style.color        = '#a5d6a7';
+  }
+}
+
+async function toggleServo() {
+  const endpoint = _servoActive ? '/servo/stop' : '/servo/start';
+  const res = await fetch(endpoint, { method: 'POST' }).then(r => r.json());
+  if (!res.ok && !_servoActive) {
+    clog('error', `servo start failed: ${res.error}`);
+    document.getElementById('servo-status').textContent = `Error: ${res.error}`;
+    return;
+  }
+  _servoActive = !_servoActive;
+  _setServoBtn(_servoActive);
+  document.getElementById('servo-viz-panel').style.display = _servoActive ? 'block' : 'none';
+  if (_servoActive) {
+    errData.length = 0;
+    thetaData.length = 0;
+    document.getElementById('servo-log').textContent = '';
+  }
+}
+
+// ── mini line chart helper ───────────────────────────────────────────────────────
+
+const MAX_PTS = 80;
+const errData = [], thetaData = [];
+
+function drawChart(canvasId, data, color, yMax, threshLine) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const w = canvas.width = canvas.offsetWidth || 200;
+  const h = canvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  if (data.length < 2) return;
+  const scale = h / (yMax + 1e-9);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  data.forEach((v, i) => {
+    const x = (i / (MAX_PTS - 1)) * w;
+    const y = h - v * scale;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  if (threshLine != null) {
+    const ty = h - threshLine * scale;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,235,59,0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(w, ty); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ── servo status polling (replaces the earlier pollServoStatus stub) ─────────────
+
+async function pollServoStatus() {
+  try {
+    const s = await fetch('/servo/status').then(r => r.json());
+
+    // sync if server stopped due to convergence
+    if (_servoActive && !s.active) {
+      _servoActive = false;
+      _setServoBtn(false);
+      document.getElementById('servo-status').textContent = 'Converged ✓';
+    }
+
+    if (s.active) {
+      document.getElementById('servo-status').textContent =
+        `θ̂=${s.theta_hat.toFixed(1)} · |e|=${s.e_mag.toFixed(0)}px`;
+
+      errData.push(s.e_mag);
+      thetaData.push(s.theta_hat);
+      if (errData.length   > MAX_PTS) errData.shift();
+      if (thetaData.length > MAX_PTS) thetaData.shift();
+
+      const maxErr = Math.max(...errData, 60);
+      drawChart('chart-error', errData,   '#ef5350', maxErr,  30);
+      drawChart('chart-theta', thetaData, '#4fc3f7', Math.max(...thetaData, 50), null);
+
+      if (s.last_cmd && s.last_cmd.dir_u !== undefined) {
+        const c = s.last_cmd;
+        const uStr = c.dir_u ? `${c.dir_u} ${c.step_u.toFixed(2)}m` : '--';
+        const vStr = c.dir_v ? `${c.dir_v} ${c.step_v.toFixed(2)}m` : '--';
+        const line = `[${s.iteration}] |e|=${s.e_mag.toFixed(1)}px  θ̂=${s.theta_hat.toFixed(2)}  u:${uStr}  v:${vStr}\n`;
+        const logEl = document.getElementById('servo-log');
+        logEl.textContent += line;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+    }
+  } catch (_) {}
+}
+setInterval(pollServoStatus, 500);
 
 // ── crosshair overlay ────────────────────────────────────────────────────────────
 

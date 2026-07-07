@@ -14,6 +14,7 @@ Open http://localhost:8080
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -46,6 +47,17 @@ _shutdown = threading.Event()
 drone_node: DroneNode | None = None
 rover_node: RoverNode | None = None
 camera_node: CameraNode | None = None
+
+# ── Visual servo state ───────────────────────────────────────────────────────────
+_servo_active   = False
+_servo_theta_hat: float = 20.0
+_servo_e_mag:    float = 0.0
+_servo_last_cmd: dict  = {}
+_servo_iteration: int  = 0
+
+_SERVO_CX    = 640.0   # image centre x (1280px wide)
+_SERVO_CY    = 360.0   # image centre y (720px tall)
+_SERVO_THRESH = 30.0   # convergence radius [px]
 
 
 def _ros_thread() -> None:
@@ -173,6 +185,124 @@ async def frontend_log(entry: FrontendLog):
 async def detection_boxes():
     boxes = camera_node.get_boxes() if camera_node else []
     return {'boxes': boxes}
+
+
+# ── Visual servo ────────────────────────────────────────────────────────────────
+
+async def _servo_loop() -> None:
+    global _servo_active, _servo_theta_hat, _servo_e_mag, _servo_last_cmd, _servo_iteration
+
+    K         = 0.3    # proportional gain
+    DELTA     = 0.05   # GD learning rate
+    STEP_MIN  = 0.05   # m
+    STEP_MAX  = 0.40   # m
+    LOOP_WAIT = 1.25   # seconds between steps (drone needs time to settle)
+
+    theta_hat       = 20.0
+    prev_center     = None
+    prev_step_u     = 0.0
+    prev_step_v     = 0.0
+    iteration       = 0
+
+    log.info('[servo] loop started')
+    while _servo_active:
+        boxes = camera_node.get_boxes() if camera_node else []
+        if not boxes:
+            await asyncio.sleep(LOOP_WAIT)
+            continue
+
+        box = max(boxes, key=lambda b: b['conf'])
+        u = (box['x1'] + box['x2']) / 2.0
+        v = (box['y1'] + box['y2']) / 2.0
+
+        eu = _SERVO_CX - u
+        ev = _SERVO_CY - v
+        e_mag = math.sqrt(eu ** 2 + ev ** 2)
+
+        # ── GD theta_hat update ──────────────────────────────────────────────────
+        if prev_center is not None:
+            du = u - prev_center[0]
+            dv = v - prev_center[1]
+            phi_sq = prev_step_u ** 2 + prev_step_v ** 2
+            if phi_sq > 1e-6:
+                pred_err = theta_hat * phi_sq - (du * prev_step_u + dv * prev_step_v)
+                theta_hat -= DELTA * pred_err
+                theta_hat = max(1.0, theta_hat)
+
+        _servo_theta_hat = theta_hat
+        _servo_e_mag     = e_mag
+        _servo_iteration = iteration
+
+        if e_mag < _SERVO_THRESH:
+            log.info(f'[servo] CONVERGED  |e|={e_mag:.1f}px  theta_hat={theta_hat:.2f}')
+            _servo_last_cmd = {'dir_u': None, 'step_u': 0.0, 'dir_v': None, 'step_v': 0.0}
+            break
+
+        # ── control law ──────────────────────────────────────────────────────────
+        step_u = float(min(max(K * abs(eu) / theta_hat, STEP_MIN), STEP_MAX))
+        step_v = float(min(max(K * abs(ev) / theta_hat, STEP_MIN), STEP_MAX))
+
+        dir_u = dir_v = None
+
+        if abs(eu) > _SERVO_THRESH / 2 and drone_node:
+            dir_u = 'right' if eu > 0 else 'left'
+            drone_node.apply_increment(dir_u, step_u)
+
+        if abs(ev) > _SERVO_THRESH / 2 and drone_node:
+            # ev > 0 → drone above centre → lower it → NED 'down'
+            dir_v = 'down' if ev > 0 else 'up'
+            drone_node.apply_increment(dir_v, step_v)
+
+        _servo_last_cmd = {
+            'dir_u': dir_u, 'step_u': round(step_u, 3),
+            'dir_v': dir_v, 'step_v': round(step_v, 3),
+        }
+        log.info(f'[servo] iter={iteration}  |e|={e_mag:.1f}px  theta_hat={theta_hat:.2f}'
+                 f'  u:{dir_u} {step_u:.2f}m  v:{dir_v} {step_v:.2f}m')
+
+        prev_center = (u, v)
+        prev_step_u = step_u if eu > 0 else -step_u
+        prev_step_v = step_v if ev > 0 else -step_v
+        iteration  += 1
+
+        await asyncio.sleep(LOOP_WAIT)
+
+    _servo_active = False
+    log.info('[servo] loop exited')
+
+
+@app.post('/servo/start')
+async def servo_start():
+    global _servo_active, _servo_theta_hat, _servo_e_mag, _servo_last_cmd, _servo_iteration
+    if _servo_active:
+        return {'ok': False, 'error': 'already running'}
+    if drone_node is None or camera_node is None:
+        return {'ok': False, 'error': 'nodes not ready'}
+    _servo_active    = True
+    _servo_theta_hat = 20.0
+    _servo_e_mag     = 0.0
+    _servo_last_cmd  = {}
+    _servo_iteration = 0
+    asyncio.create_task(_servo_loop())
+    return {'ok': True}
+
+
+@app.post('/servo/stop')
+async def servo_stop():
+    global _servo_active
+    _servo_active = False
+    return {'ok': True}
+
+
+@app.get('/servo/status')
+async def servo_status():
+    return {
+        'active':    _servo_active,
+        'theta_hat': round(_servo_theta_hat, 3),
+        'e_mag':     round(_servo_e_mag, 1),
+        'last_cmd':  _servo_last_cmd,
+        'iteration': _servo_iteration,
+    }
 
 
 # ── Drone endpoints ──────────────────────────────────────────────────────────────
