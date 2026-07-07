@@ -15,8 +15,9 @@ just points two <img> tags at two ports.
 Actuation is off unless explicitly engaged, and even then:
   - a stale-frame watchdog forces the sticks back to neutral if the video
     feed freezes (never latch a stale correction onto a flying drone),
-  - "pulsed" mode (default) nudges then releases, mimicking the proven-healthy
-    button-press pattern; "continuous" holds armed for comparison,
+  - Displacement Hold fires one fixed nudge when accumulated drift crosses a
+    threshold, then goes fully neutral for a settle window before
+    re-evaluating — never a continuous stream of corrections,
   - every command actually sent is logged with its exact bytes.
 """
 
@@ -93,21 +94,25 @@ class FlowProcessor:
         self._thread: Optional[threading.Thread] = None
         self._running = False
 
-        # actuation state
         self.engaged = False
-        self.pulsed = True
-        self.pulse_on_s = 0.15
-        self.pulse_period_s = 0.5
-        self._pulse_next = 0.0
-        self._pulse_off_at: Optional[float] = None
         self._last_sent_neutral = False
 
+        # Displacement Hold: fire one fixed tiny nudge when accumulated drift
+        # (stabilizer's cum_dx/dy) crosses a threshold, then go fully neutral
+        # for a fixed settle window before re-evaluating.
+        self.roll_enabled = True
+        self.throttle_enabled = False   # default off
+        self.hold_threshold_px = 10.0
+        self.hold_settle_s = 2.0
+        self.hold_nudge_px = 4          # fixed one-shot magnitude
+        self._hold_settle_until = 0.0
+
         # live state / stats
-        self.last_corr: FlowCorrection = FlowCorrection(0, 0, 0.0, 0.0, valid=False)
+        self.last_corr: FlowCorrection = FlowCorrection(0.0, 0.0, valid=False)
         self.last_frame_ts: Optional[float] = None
         self.frames_processed = 0
         self.start_error: Optional[str] = None
-        self._plot = deque(maxlen=plot_history)  # (t, dx, dy, roll, throttle)
+        self._plot = deque(maxlen=plot_history)  # (t, dx, dy, cum_dx, cum_dy)
         self._plot_lock = threading.Lock()
         self._corrections = deque(maxlen=corrections_history)  # dicts, newest last
         self._corrections_lock = threading.Lock()
@@ -131,7 +136,8 @@ class FlowProcessor:
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
             self.logger.log({"event": "processor_start", "source": self.source.name,
-                             "arrow_url": self.arrow_url, "hsv_url": self.hsv_url})
+                             "arrow_url": self.arrow_url, "hsv_url": self.hsv_url,
+                             "params": {**self.stabilizer.params(), **self._actuation_params()}})
 
     def stop(self):
         with self._lifecycle_lock:
@@ -160,9 +166,8 @@ class FlowProcessor:
 
     def engage(self):
         self.engaged = True
-        self._pulse_next = 0.0
-        self._pulse_off_at = None
-        self.logger.log({"event": "engage", "pulsed": self.pulsed})
+        self._hold_settle_until = 0.0
+        self.logger.log({"event": "engage"})
 
     def disengage(self):
         self.engaged = False
@@ -194,12 +199,12 @@ class FlowProcessor:
         with self._corrections_lock:
             return list(self._corrections)
 
-    def _record_correction(self, *, roll, pitch, throttle, yaw, pulsed, frame_age, reason):
+    def _record_correction(self, *, roll, pitch, throttle, yaw, frame_age, reason):
         with self._corrections_lock:
             self._corrections.append({
                 "time": time.strftime("%H:%M:%S"),
                 "roll": roll, "pitch": pitch, "throttle": throttle, "yaw": yaw,
-                "pulsed": pulsed, "frame_age_ms": round(frame_age * 1000, 1),
+                "frame_age_ms": round(frame_age * 1000, 1),
                 "reason": reason,
             })
 
@@ -218,10 +223,11 @@ class FlowProcessor:
                 self._publish_views(frame, corr)
                 self.logger.log_frame(corr, frame_idx=self.frames_processed,
                                       source_name=self.source.name,
-                                      source_fps=self.source.fps)
+                                      source_fps=self.source.fps,
+                                      params={**self.stabilizer.params(), **self._actuation_params()})
                 with self._plot_lock:
                     self._plot.append((now, corr.flow_dx, corr.flow_dy,
-                                       corr.roll_delta, corr.throttle_delta))
+                                       corr.cum_dx, corr.cum_dy))
 
             frame_age = (now - self.last_frame_ts) if self.last_frame_ts else 999.0
             self._apply_actuation(self.last_corr, frame_age)
@@ -244,7 +250,24 @@ class FlowProcessor:
         if ok_a and self.frames_processed % self.save_every == 0:
             self.logger.save_annotated(arrow, "arrow")
 
+    def _actuation_params(self) -> dict:
+        """Displacement Hold tunables that live on FlowProcessor (not
+        FlowStabilizer), merged into the logged params snapshot for the same
+        reconstructability."""
+        return {
+            "roll_enabled": self.roll_enabled,
+            "throttle_enabled": self.throttle_enabled,
+            "hold_threshold_px": self.hold_threshold_px,
+            "hold_settle_s": self.hold_settle_s,
+            "hold_nudge_px": self.hold_nudge_px,
+        }
+
     def _apply_actuation(self, corr: FlowCorrection, frame_age: float):
+        """Displacement Hold: while settling, stay neutral. Once the settle
+        window elapses, fire one fixed-magnitude nudge if accumulated drift
+        exceeds the threshold on an enabled axis, then start a new settle
+        window — the natural ~1-frame-period loop cadence makes the nudge a
+        brief pulse before the next tick reverts to neutral on its own."""
         if not self.engaged or self.drone is None:
             return
 
@@ -254,37 +277,38 @@ class FlowProcessor:
             self._send_neutral(frame_age, reason="stale_or_invalid")
             return
 
-        roll = _clamp_stick(NEUTRAL + corr.roll_delta)
-        throttle = _clamp_stick(NEUTRAL + corr.throttle_delta)
+        now = time.time()
+        if now < self._hold_settle_until:
+            self._send_neutral(frame_age, reason="hold_settling")
+            return
 
-        if self.pulsed:
-            now = time.time()
-            if now >= self._pulse_next:
-                self._send_correction(roll, throttle, frame_age, pulsed=True, reason="pulse_on")
-                self._pulse_off_at = now + self.pulse_on_s
-                self._pulse_next = now + self.pulse_period_s
-            elif self._pulse_off_at is not None and now >= self._pulse_off_at:
-                self._go_idle(reason="pulse_off")
-                self._pulse_off_at = None
-                self.logger.log_correction_sent(
-                    roll=NEUTRAL, pitch=NEUTRAL, throttle=NEUTRAL, yaw=NEUTRAL,
-                    engaged=True, pulsed=True, frame_age=frame_age, reason="pulse_off")
-                self._record_correction(roll=NEUTRAL, pitch=NEUTRAL, throttle=NEUTRAL,
-                                        yaw=NEUTRAL, pulsed=True, frame_age=frame_age,
-                                        reason="pulse_off")
-        else:
-            self._send_correction(roll, throttle, frame_age, pulsed=False, reason="continuous")
+        roll_sign = -1.0 if self.stabilizer.flip_roll else 1.0
+        thr_sign = -1.0 if self.stabilizer.flip_throttle else 1.0
+        err_roll = roll_sign * corr.cum_dx if self.roll_enabled else 0.0
+        err_thr = thr_sign * -corr.cum_dy if self.throttle_enabled else 0.0
+        fire_roll = self.roll_enabled and abs(err_roll) > self.hold_threshold_px
+        fire_thr = self.throttle_enabled and abs(err_thr) > self.hold_threshold_px
 
-    def _send_correction(self, roll: int, throttle: int, frame_age: float,
-                         pulsed: bool, reason: str):
+        if not (fire_roll or fire_thr):
+            self._send_neutral(frame_age, reason="hold_within_threshold")
+            return
+
+        roll = _clamp_stick(NEUTRAL + (self.hold_nudge_px if err_roll > 0 else -self.hold_nudge_px)) \
+            if fire_roll else NEUTRAL
+        throttle = _clamp_stick(NEUTRAL + (self.hold_nudge_px if err_thr > 0 else -self.hold_nudge_px)) \
+            if fire_thr else NEUTRAL
+        self._send_correction(roll, throttle, frame_age, reason="hold_fire")
+        self._hold_settle_until = now + self.hold_settle_s
+
+    def _send_correction(self, roll: int, throttle: int, frame_age: float, reason: str):
         self.drone.set_idle_mode(False)
         self.drone.set_controls(roll=roll, pitch=NEUTRAL, throttle=throttle, yaw=NEUTRAL)
         self._last_sent_neutral = False
         self.logger.log_correction_sent(
             roll=roll, pitch=NEUTRAL, throttle=throttle, yaw=NEUTRAL,
-            engaged=True, pulsed=pulsed, frame_age=frame_age, reason=reason)
+            engaged=True, frame_age=frame_age, reason=reason)
         self._record_correction(roll=roll, pitch=NEUTRAL, throttle=throttle, yaw=NEUTRAL,
-                                pulsed=pulsed, frame_age=frame_age, reason=reason)
+                                frame_age=frame_age, reason=reason)
 
     def _send_neutral(self, frame_age: float, reason: str):
         if self._last_sent_neutral:
@@ -293,6 +317,6 @@ class FlowProcessor:
         self._last_sent_neutral = True
         self.logger.log_correction_sent(
             roll=NEUTRAL, pitch=NEUTRAL, throttle=NEUTRAL, yaw=NEUTRAL,
-            engaged=True, pulsed=self.pulsed, frame_age=frame_age, reason=reason)
+            engaged=True, frame_age=frame_age, reason=reason)
         self._record_correction(roll=NEUTRAL, pitch=NEUTRAL, throttle=NEUTRAL, yaw=NEUTRAL,
-                                pulsed=self.pulsed, frame_age=frame_age, reason=reason)
+                                frame_age=frame_age, reason=reason)

@@ -9,8 +9,10 @@ copy of the frame so a human (or a future debugging session) can eyeball it:
   - draw_hsv         : the whole dense flow field as color (hue=direction,
                        value=magnitude), the classic OpenCV flow colorization
   - draw_roi_box     : the central region the stabilizer actually samples
-  - draw_drift_vector: one big arrow = the smoothed drift that drives the
-                       correction (the "decision", vs the small arrows' "evidence")
+  - draw_drift_vector: one big arrow = this frame's deadbanded flow velocity
+                       (vs the small arrows' raw per-tile "evidence")
+  - draw_position_marker: persistent home-cross + position-dot = cumulative
+                       displacement since origin — what Displacement Hold acts on
   - draw_hud         : text overlay with all the live numbers
 
 The flow field / ROI come from FlowStabilizer at `work_size` resolution; these
@@ -79,12 +81,37 @@ def draw_roi_box(img: np.ndarray, roi, scale: float, color=_YELLOW) -> np.ndarra
 
 def draw_drift_vector(img: np.ndarray, dx: float, dy: float,
                       arrow_gain: float = 12.0, color=_CYAN) -> np.ndarray:
-    """One big arrow from image center = smoothed drift driving the correction."""
+    """One big arrow from image center = this frame's deadbanded flow
+    VELOCITY (no smoothing). Decays to ~0 the instant motion stops — this is
+    "how fast am I moving right now", not "how far off from home am I". For
+    that, see draw_position_marker below."""
     h, w = img.shape[:2]
     cx, cy = w // 2, h // 2
     tip = (int(cx + dx * arrow_gain), int(cy + dy * arrow_gain))
     cv2.arrowedLine(img, (cx, cy), tip, color, 3, line_type=cv2.LINE_AA, tipLength=0.3)
     cv2.circle(img, (cx, cy), 4, color, -1)
+    return img
+
+
+def draw_position_marker(img: np.ndarray, cum_dx: float, cum_dy: float,
+                         gain: float = 3.0, color=_RED) -> np.ndarray:
+    """Persistent marker for cumulative drift (a POSITION, integrated over
+    the whole session) — unlike draw_drift_vector, this stays put when the
+    scene is still and only moves with actual net displacement since the
+    last reset_origin(). A fixed 'home' cross marks the origin; the filled
+    dot is the current estimated position; the line between them is the
+    total accumulated offset."""
+    h, w = img.shape[:2]
+    cx, cy = w // 2, h // 2
+    px = int(np.clip(cx + cum_dx * gain, 0, w - 1))
+    py = int(np.clip(cy + cum_dy * gain, 0, h - 1))
+    # home cross
+    cv2.drawMarker(img, (cx, cy), color, markerType=cv2.MARKER_CROSS,
+                   markerSize=14, thickness=2)
+    # line from home to current estimated position, then the position dot
+    cv2.line(img, (cx, cy), (px, py), color, 1, cv2.LINE_AA)
+    cv2.circle(img, (px, py), 6, color, -1)
+    cv2.circle(img, (px, py), 6, _WHITE, 1, cv2.LINE_AA)
     return img
 
 
@@ -99,9 +126,10 @@ def draw_hud(img: np.ndarray, corr: FlowCorrection, *, source_fps: float,
     """Text overlay with all the live numbers."""
     lines = [
         f"src={source_name} fps={source_fps:4.1f}  compute={corr.compute_ms:4.1f}ms",
-        f"raw   dx={corr.raw_dx:+6.2f} dy={corr.raw_dy:+6.2f}",
-        f"smooth dx={corr.flow_dx:+6.2f} dy={corr.flow_dy:+6.2f}  valid={corr.valid}",
-        f"corr  roll={corr.roll_delta:+3d} throttle={corr.throttle_delta:+3d}",
+        f"raw  dx={corr.raw_dx:+6.2f} dy={corr.raw_dy:+6.2f}",
+        f"flow dx={corr.flow_dx:+6.2f} dy={corr.flow_dy:+6.2f}  valid={corr.valid}",
+        f"cum (position, since origin)  dx={corr.cum_dx:+7.1f} dy={corr.cum_dy:+7.1f} px"
+        + ("" if corr.coherent else "  [NOISE-GATED, not accumulated]"),
     ]
     y = 18
     for ln in lines:
@@ -133,6 +161,7 @@ def render_arrow_view(frame_bgr: np.ndarray, corr: FlowCorrection, *,
     if corr.flow is not None:
         draw_flow_arrows(out, corr.flow, scale)
         draw_drift_vector(out, corr.flow_dx, corr.flow_dy)
+    draw_position_marker(out, corr.cum_dx, corr.cum_dy)
     draw_roi_box(out, corr.roi, scale)
     draw_hud(out, corr, source_fps=source_fps, engaged=engaged,
              source_name=source_name, sent=sent)

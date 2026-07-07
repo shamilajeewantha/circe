@@ -8,10 +8,10 @@ most recent one. This is so a future debugging session can reconstruct exactly
 what the algorithm saw and what it sent to the drone, entirely offline.
 
 Two record streams into one JSONL:
-  - one record per processed frame (dx/dy raw + smoothed, corrections,
-    compute_ms, source, frame index, valid) — event "flow_frame"
+  - one record per processed frame (dx/dy raw + flow, cumulative displacement,
+    coherence, compute_ms, source, frame index, valid) — event "flow_frame"
   - one record per corrective command ACTUALLY SENT to the drone, with the
-    exact roll/pitch/throttle/yaw bytes, engaged/pulsed state, and how fresh
+    exact roll/pitch/throttle/yaw bytes, engaged state, and how fresh
     the driving video frame was at send time — event "correction_sent"
 
 Plus a bounded set of saved annotated .jpg frames for eyeballing later.
@@ -57,8 +57,14 @@ class FlowLogger:
             with open(self._jsonl_path, "a") as f:
                 f.write(json.dumps(record) + "\n")
 
-    def log_frame(self, corr, *, frame_idx: int, source_name: str, source_fps: float):
-        self.log({
+    def log_params(self, params: dict, reason: str = ""):
+        """Snapshot of the controller tunables in effect (deadband/threshold/…),
+        so the magnitude of every later correction is reconstructable offline."""
+        self.log({"event": "params", "reason": reason, **params})
+
+    def log_frame(self, corr, *, frame_idx: int, source_name: str, source_fps: float,
+                  params: Optional[dict] = None):
+        rec = {
             "event": "flow_frame",
             "frame_idx": frame_idx,
             "source": source_name,
@@ -66,22 +72,28 @@ class FlowLogger:
             "valid": corr.valid,
             "raw_dx": round(corr.raw_dx, 3),
             "raw_dy": round(corr.raw_dy, 3),
-            "smooth_dx": round(corr.flow_dx, 3),
-            "smooth_dy": round(corr.flow_dy, 3),
-            "roll_delta": corr.roll_delta,
-            "throttle_delta": corr.throttle_delta,
+            "flow_dx": round(corr.flow_dx, 3),
+            "flow_dy": round(corr.flow_dy, 3),
+            "cum_dx": round(corr.cum_dx, 3),
+            "cum_dy": round(corr.cum_dy, 3),
+            "coherent": corr.coherent,
+            "mad_dx": round(corr.mad_dx, 3),
+            "mad_dy": round(corr.mad_dy, 3),
             "compute_ms": round(corr.compute_ms, 3),
-        })
+        }
+        if params is not None:
+            rec["params"] = params
+        self.log(rec)
 
     def log_correction_sent(self, *, roll: int, pitch: int, throttle: int, yaw: int,
-                            engaged: bool, pulsed: bool, frame_age: float,
+                            engaged: bool, frame_age: float,
                             reason: str = ""):
         """Log a control command actually pushed to the drone (or the neutral
         it was forced to). `frame_age` = seconds since the driving video frame."""
         self.log({
             "event": "correction_sent",
             "roll": roll, "pitch": pitch, "throttle": throttle, "yaw": yaw,
-            "engaged": engaged, "pulsed": pulsed,
+            "engaged": engaged,
             "frame_age": round(frame_age, 3),
             "reason": reason,
         })

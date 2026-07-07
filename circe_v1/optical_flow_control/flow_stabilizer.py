@@ -1,7 +1,8 @@
 """
-Dense-optical-flow-based drift estimator, meant for "hold position" style
-corrections (roll to cancel left/right drift, throttle to cancel climb/
-descent) from a live camera feed.
+Dense-optical-flow-based drift estimator for Displacement Hold: measures
+cumulative pixel displacement from a live camera feed so the drone can be
+nudged back toward where it started (roll cancels left/right drift, throttle
+cancels climb/descent).
 
 Model choice (researched before writing this): OpenCV's DIS (Dense Inverse
 Search) optical flow, ultrafast preset. Deep-learning models (RAFT,
@@ -31,14 +32,15 @@ There is no way to fully recover translational drift from a forward camera
 alone without fusing IMU data to subtract out rotation (the MPU-9250 gyro
 in the circe_v1/docs/mothership-scout.md design is earmarked for exactly
 this, on the rover). Until then, this is a deliberate approximation:
-robust (median) flow over a central ROI, treated as "dominant apparent
-drift". Good enough for a HOVER-IN-PLACE feature that isn't deliberately
-yawing; wrong if the drone is also intentionally turning while this runs.
+robust (median) flow over a central ROI, integrated into a cumulative
+displacement estimate. Good enough for a HOVER-IN-PLACE feature that isn't
+deliberately yawing; wrong if the drone is also intentionally turning while
+this runs.
 
 Sign conventions (roll/throttle direction vs. flow direction) are a
-best-effort guess and NOT yet live-verified against the real drone — flip
-`gain` negative for either axis independently if a first live test shows
-it correcting the wrong way.
+best-effort guess and NOT yet live-verified against the real drone —
+`flip_roll`/`flip_throttle` let Displacement Hold flip either axis
+independently if a first live test shows it correcting the wrong way.
 """
 
 from __future__ import annotations
@@ -54,15 +56,27 @@ NEUTRAL_STICK = 128
 
 @dataclass
 class FlowCorrection:
-    roll_delta: int
-    throttle_delta: int
-    flow_dx: float          # smoothed dx that actually drove the correction
-    flow_dy: float          # smoothed dy that actually drove the correction
+    flow_dx: float          # this-frame deadbanded dx (velocity, px/frame) — diagnostic only
+    flow_dy: float          # this-frame deadbanded dy (velocity, px/frame) — diagnostic only
     valid: bool             # False on the first frame of a session (no prior frame yet)
     # ── extras for visualization / logging (added for the Flow Lab) ──
-    raw_dx: float = 0.0     # this-frame median dx BEFORE smoothing/deadband
+    raw_dx: float = 0.0     # this-frame median dx BEFORE deadband
     raw_dy: float = 0.0
     compute_ms: float = 0.0  # time spent inside update() for this frame
+    # Cumulative pixel displacement since the last reset_origin()/reset() call —
+    # a POSITION estimate (integrated drift), not the instantaneous velocity
+    # `flow_dx`/`flow_dy` above are. Stays put when the scene is still; only
+    # `flow_dx`/`flow_dy` decays to ~0. This is what Displacement Hold acts on.
+    cum_dx: float = 0.0
+    cum_dy: float = 0.0
+    # Whether this frame's flow field was coherent (real coalesced motion) vs.
+    # scattered noise (sensor/compression noise, worse on the drone's lossy
+    # video) — noise still gets computed/shown (e.g. in the HSV debug view,
+    # which is meant to expose it), it's just excluded from the cum_dx/dy
+    # integral above so noise doesn't get counted as movement.
+    coherent: bool = True
+    mad_dx: float = 0.0     # ROI flow-field scatter (median abs deviation) driving `coherent`
+    mad_dy: float = 0.0
     # Raw dense flow field (in work_size coords) + the ROI rectangle that was
     # sampled, both in work_size pixel coordinates. `flow` is None on the first
     # (valid=False) frame. The annotator scales these up to the display frame.
@@ -72,49 +86,54 @@ class FlowCorrection:
 
 
 class FlowStabilizer:
-    """Feed consecutive BGR frames in; get back a small roll/throttle
-    stick-delta meant to cancel the dominant apparent drift. Stateful
-    (holds the previous frame + a smoothing filter) — call `reset()`
-    when starting a new session or after a gap, so stale state from a
-    previous run doesn't get treated as motion.
+    """Feed consecutive BGR frames in; get back a cumulative pixel-displacement
+    estimate for Displacement Hold to act on. Stateful (holds the previous
+    frame) — call `reset()` when starting a new session or after a gap, so
+    stale state from a previous run doesn't get treated as motion.
     """
 
     def __init__(self, work_width: int = 320, work_height: int = 180,
                  roi_fraction: float = 0.6, deadband_px: float = 0.8,
-                 gain: float = 1.5, max_correction: int = 6,
-                 smoothing_alpha: float = 0.4,
+                 coherence_mad_max: float = 1.5,
                  flip_roll: bool = False, flip_throttle: bool = False):
         self.work_size = (work_width, work_height)
         self.roi_fraction = roi_fraction
         self.deadband_px = deadband_px
-        self.gain = gain
-        self.max_correction = max_correction
-        self.smoothing_alpha = smoothing_alpha
+        # Max per-axis median-absolute-deviation (px) of the ROI's flow field
+        # allowed before a frame is treated as scattered noise rather than
+        # coherent motion — gates the cumulative displacement integral only
+        # (see FlowCorrection.coherent).
+        self.coherence_mad_max = coherence_mad_max
         # Correction sign is not yet live-verified against the real drone (see
         # module docstring). These let the UI flip either axis independently
-        # if the drift arrow shows the correction fighting the wrong way.
+        # if Displacement Hold corrects the wrong way.
         self.flip_roll = flip_roll
         self.flip_throttle = flip_throttle
 
         self._flow_engine = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST)
         self._prev_gray: np.ndarray | None = None
-        self._smoothed_dx = 0.0
-        self._smoothed_dy = 0.0
+        # Cumulative displacement since origin — see FlowCorrection.cum_dx/dy.
+        self._cum_dx = 0.0
+        self._cum_dy = 0.0
 
     def reset(self):
         self._prev_gray = None
-        self._smoothed_dx = 0.0
-        self._smoothed_dy = 0.0
+        self._cum_dx = 0.0
+        self._cum_dy = 0.0
+
+    def reset_origin(self):
+        """Mark 'here' as home without disturbing flow-tracking state (prev
+        frame) — unlike reset(), safe to call live."""
+        self._cum_dx = 0.0
+        self._cum_dy = 0.0
 
     def params(self) -> dict:
         """Full snapshot of the tunables in effect, so every logged frame /
-        correction can be reconstructed offline (why was the delta that big?)."""
+        correction can be reconstructed offline."""
         return {
-            "gain": self.gain,
-            "max_correction": self.max_correction,
+            "coherence_mad_max": self.coherence_mad_max,
             "deadband_px": self.deadband_px,
             "roi_fraction": self.roi_fraction,
-            "smoothing_alpha": self.smoothing_alpha,
             "flip_roll": self.flip_roll,
             "flip_throttle": self.flip_throttle,
             "work_size": list(self.work_size),
@@ -138,8 +157,9 @@ class FlowStabilizer:
 
         if self._prev_gray is None:
             self._prev_gray = gray
-            return FlowCorrection(0, 0, 0.0, 0.0, valid=False,
+            return FlowCorrection(0.0, 0.0, valid=False,
                                   compute_ms=(time.perf_counter() - t0) * 1000.0,
+                                  cum_dx=self._cum_dx, cum_dy=self._cum_dy,
                                   roi=roi_rect, work_size=self.work_size)
 
         flow = self._flow_engine.calc(self._prev_gray, gray, None)
@@ -155,21 +175,30 @@ class FlowStabilizer:
         dx = 0.0 if abs(raw_dx) < self.deadband_px else raw_dx
         dy = 0.0 if abs(raw_dy) < self.deadband_px else raw_dy
 
-        a = self.smoothing_alpha
-        self._smoothed_dx = a * dx + (1 - a) * self._smoothed_dx
-        self._smoothed_dy = a * dy + (1 - a) * self._smoothed_dy
+        # Coherence: how tightly the ROI's per-pixel flow agrees with the
+        # median. Real camera motion produces a coherent field (most vectors
+        # agree); pure sensor/compression noise produces a scattered one.
+        # Gate the cumulative-position integral on this so noise that happens
+        # to exceed the deadband doesn't get summed in as if it were real
+        # displacement.
+        mad_x = float(np.median(np.abs(roi[..., 0] - raw_dx)))
+        mad_y = float(np.median(np.abs(roi[..., 1] - raw_dy)))
+        coherent = (mad_x < self.coherence_mad_max) and (mad_y < self.coherence_mad_max)
 
-        roll_sign = -1.0 if self.flip_roll else 1.0
-        throttle_sign = -1.0 if self.flip_throttle else 1.0
-        roll_delta = int(np.clip(roll_sign * self._smoothed_dx * self.gain,
-                                  -self.max_correction, self.max_correction))
-        throttle_delta = int(np.clip(throttle_sign * -self._smoothed_dy * self.gain,
-                                      -self.max_correction, self.max_correction))
+        # Integrate the deadbanded (not raw) per-frame flow into a running
+        # position estimate — using the deadbanded value keeps a stationary
+        # camera from random-walking on pure sensor noise. Only accumulate
+        # when the frame's flow is coherent (see above) — noise still shows
+        # up in the raw/HSV views, it's just excluded from this integral.
+        if coherent:
+            self._cum_dx += dx
+            self._cum_dy += dy
 
         return FlowCorrection(
-            roll_delta, throttle_delta,
-            self._smoothed_dx, self._smoothed_dy, valid=True,
+            dx, dy, valid=True,
             raw_dx=raw_dx, raw_dy=raw_dy,
             compute_ms=(time.perf_counter() - t0) * 1000.0,
+            cum_dx=self._cum_dx, cum_dy=self._cum_dy, coherent=coherent,
+            mad_dx=mad_x, mad_dy=mad_y,
             flow=flow, roi=roi_rect, work_size=self.work_size,
         )

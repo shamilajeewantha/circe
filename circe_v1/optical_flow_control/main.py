@@ -21,15 +21,23 @@ poll tick, never just "what was last clicked" — so an automatic safety
 disengage (stale video) shows up on the button without another click.
 
 A second, minimal tab ("Optical Flow — Demo") is a webcam-only sandbox for
-tuning gain/deadband/signs before trusting them on the real drone. It shares
+tuning deadband/ROI/signs before trusting them on the real drone. It shares
 the same FlowStabilizer instance, so tuning there carries over to Hold
 Position.
+
+Actuation is Displacement Hold: while accumulated drift (cum_dx/cum_dy) stays
+under a threshold, nothing is sent; once it crosses, one fixed-size nudge
+fires and the drone goes fully neutral for a settle window before the next
+check — never a continuous stream of corrections.
 
 Run with:  python main.py
 Then open the printed local URL in a browser.
 """
 
+import atexit
 import os
+import signal
+import threading
 import time
 import warnings
 
@@ -40,7 +48,7 @@ warnings.filterwarnings("ignore", message=".*HTTP_422_UNPROCESSABLE_ENTITY.*")
 import gradio as gr
 import pandas as pd
 
-from applog import get_logger
+from applog import get_logger, close_logging
 from drone import Drone, NEUTRAL
 from video_stream import VideoReceiver, MjpegServer
 from flow_stabilizer import FlowStabilizer
@@ -59,16 +67,28 @@ processor: FlowProcessor | None = None       # Hold Position (drone) processor
 demo_processor: FlowProcessor | None = None  # Optical Flow tab (webcam) processor
 _log: list[str] = []
 
+# Serializes all four toggle handlers (Connect / Start video / Hold Position /
+# webcam Demo) so a rapid double-click can't race two connects/videos/demos and
+# orphan a socket, thread, or bound port. Also makes the Hold-Position/Demo
+# mutual-exclusion check below race-free, since both read-check-and-write the
+# processor/demo_processor globals only from inside this same lock.
+# Mirrors FlowProcessor's own _lifecycle_lock.
+_ui_lock = threading.Lock()
+
 HOLD_ARROW_PORT, HOLD_HSV_PORT = 8091, 8092
 DEMO_ARROW_PORT, DEMO_HSV_PORT = 8093, 8094
-
-_CORR_COLUMNS = ["time", "roll", "pitch", "throttle", "yaw", "pulsed", "frame_age_ms", "reason"]
-
 
 def _note(msg: str) -> str:
     log.info(msg)
     ts = time.strftime("%H:%M:%S")
     _log.append(f"[{ts}] {msg}")
+    # Fan the same action into whichever session logger(s) are live, so a
+    # single JSONL shows button presses interleaved with packet/frame events
+    # on one comparable timeline — no more manually cross-referencing app.log
+    # (human timestamps) against the video/flow JSONL (relative-float timestamps).
+    for target in (video, processor, demo_processor):
+        if target is not None:
+            target.logger.log({"event": "ui_action", "msg": msg})
     return "\n".join(_log[-16:])
 
 
@@ -177,6 +197,33 @@ def _ui_sync():
     return _connect_button(), _video_button(), _hold_button(), poll_status()
 
 
+def _check_lost_link():
+    """If the drone control loop died (a send error auto-disarms it) while video
+    or Hold Position is still live, cascade-teardown once — never keep a
+    FlowProcessor/VideoReceiver running against a dead socket. Runs from the poll
+    timer, so recovery is automatic without the user clicking anything."""
+    if drone._armed or (video is None and processor is None):
+        return
+    if not _ui_lock.acquire(blocking=False):
+        return  # a toggle handler is mid-flight; it'll settle on the next tick
+    try:
+        if not drone._armed and (video is not None or processor is not None):
+            _teardown_video("lost link — drone control loop stopped")
+            _note("Lost connection to drone — video / Hold Position torn down.")
+    finally:
+        _ui_lock.release()
+
+
+def _poll_sync():
+    """One timer tick: auto-recover from a lost link, then refresh every
+    state-driven display (video feed, both flow views, all three toggle
+    buttons, status badges) from real backend state."""
+    _check_lost_link()
+    arrow_html, hsv_html = _hold_views_html()
+    return (_raw_video_html(), arrow_html, hsv_html,
+            _connect_button(), _video_button(), _hold_button(), poll_status())
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # Connection & Video toggles
 # ════════════════════════════════════════════════════════════════════════════
@@ -187,49 +234,63 @@ def _raw_video_html():
     return "<div id='video-box'>🎥 Video feed not connected yet</div>"
 
 
-def do_toggle_connect():
-    if _connected():
-        _teardown_connection("user disconnect")
-        note = _note("Disconnected.")
-    else:
-        drone.last_error = None
-        try:
-            drone.connect()
-            # Real app spends ~95% of a healthy video session disarmed/idle —
-            # engage idle mode immediately rather than waiting for Start
-            # video (a live test showed the stall locking in before a later
-            # switch took effect). Flight commands auto-wake the drone.
-            drone.set_idle_mode(True)
-            note = _note(f"Connected — streaming controls to {drone.ip}:{drone.port}")
-        except OSError as e:
-            note = _note(f"Connect failed: {e}")
-    return (note, _raw_video_html()) + _ui_sync()
+def _start_video(width, height, color) -> str:
+    """Start the video receiver + MJPEG server. Assumes the caller already
+    holds _ui_lock and has confirmed we're connected and video isn't already
+    running. Returns a status note (success or error)."""
+    global video, mjpeg
+    drone.set_idle_mode(True)
+    video = VideoReceiver(drone.sock, drone.ip, drone.port,
+                          width=int(width), height=int(height),
+                          components=3 if color else 1)
+    video.start()
+    mjpeg = MjpegServer(video)
+    try:
+        mjpeg.start()
+        return _note(f"Video started ({int(width)}x{int(height)}). "
+                     f"Log: {video.logger._jsonl_path}")
+    except OSError as e:
+        video.stop()
+        video = None
+        mjpeg = None
+        return _note(f"Video failed to bind: {e} (port may still be releasing)")
+
+
+def do_toggle_connect(width=640, height=360, color=True):
+    with _ui_lock:  # serialize toggles — no double-connect race
+        if _connected():
+            _teardown_connection("user disconnect")
+            note = _note("Disconnected.")
+        else:
+            drone.last_error = None
+            try:
+                drone.connect()
+                # Real app spends ~95% of a healthy video session disarmed/idle —
+                # engage idle mode immediately rather than waiting for Start
+                # video (a live test showed the stall locking in before a later
+                # switch took effect). Flight commands auto-wake the drone.
+                drone.set_idle_mode(True)
+                note = _note(f"Connected — streaming controls to {drone.ip}:{drone.port}")
+                # Auto-start video on connect so it's one less manual step —
+                # the Start/Stop video button still works independently and
+                # stays in sync (it's recomputed from the `video` global on
+                # every click and poll tick, same as every other toggle here).
+                note = _start_video(width, height, color)
+            except OSError as e:
+                note = _note(f"Connect failed: {e}")
+        return (note, _raw_video_html()) + _ui_sync()
 
 
 def do_toggle_video(width, height, color):
-    global video, mjpeg
-    if video is not None:
-        _teardown_video("user stop video")
-        note = _note("Video stopped, drone back to normal flight mode.")
-    elif not _connected():
-        note = _note("Ignored 'Start video' — not connected. Click Connect first.")
-    else:
-        drone.set_idle_mode(True)
-        video = VideoReceiver(drone.sock, drone.ip, drone.port,
-                              width=int(width), height=int(height),
-                              components=3 if color else 1)
-        video.start()
-        mjpeg = MjpegServer(video)
-        try:
-            mjpeg.start()
-            note = _note(f"Video started ({int(width)}x{int(height)}). "
-                         f"Log: {video.logger._jsonl_path}")
-        except OSError as e:
-            video.stop()
-            video = None
-            mjpeg = None
-            note = _note(f"Video failed to bind: {e} (port may still be releasing)")
-    return (note, _raw_video_html()) + _ui_sync()
+    with _ui_lock:  # serialize toggles — no double-start race
+        if video is not None:
+            _teardown_video("user stop video")
+            note = _note("Video stopped, drone back to normal flight mode.")
+        elif not _connected():
+            note = _note("Ignored 'Start video' — not connected. Click Connect first.")
+        else:
+            note = _start_video(width, height, color)
+        return (note, _raw_video_html()) + _ui_sync()
 
 
 def poll_video_stats():
@@ -262,45 +323,75 @@ def _hold_views_html():
 
 def do_toggle_hold():
     global processor
-    if _holding():
-        _release_hold_position("user released")
-        note = _note("Hold Position released. Drone back to idle/neutral.")
-    elif video is None:
-        note = _note("Ignored 'HOLD POSITION' — video isn't live. Start video first "
-                     "(can't hold position with no frames).")
-    else:
-        proc = FlowProcessor(DroneFrameSource(video), stabilizer, drone=drone,
-                             logger=FlowLogger(), arrow_port=HOLD_ARROW_PORT, hsv_port=HOLD_HSV_PORT)
-        try:
-            proc.start()
-            proc.engage()
-            processor = proc
-            note = _note(f"HOLD POSITION engaged (pulsed). Log: {proc.logger.jsonl_path}")
-        except OSError as e:
-            note = _note(f"Hold Position failed to start: {e} (port may still be releasing)")
-    arrow_html, hsv_html = _hold_views_html()
-    return (note, arrow_html, hsv_html) + _ui_sync()
+    with _ui_lock:  # serialize toggles — no double-start race
+        if _holding():
+            _release_hold_position("user released")
+            note = _note("Hold Position released. Drone back to idle/neutral.")
+        elif video is None:
+            note = _note("Ignored 'HOLD POSITION' — video isn't live. Start video first "
+                         "(can't hold position with no frames).")
+        elif demo_processor is not None:
+            note = _note("Ignored 'HOLD POSITION' — webcam Demo is running. Stop the Demo "
+                         "first (shared stabilizer can't drive two live sources at once).")
+        else:
+            proc = FlowProcessor(DroneFrameSource(video), stabilizer, drone=drone,
+                                 logger=FlowLogger(), arrow_port=HOLD_ARROW_PORT, hsv_port=HOLD_HSV_PORT)
+            try:
+                proc.start()
+                proc.engage()
+                processor = proc
+                note = _note(f"HOLD POSITION engaged (Displacement Hold). Log: {proc.logger.jsonl_path}")
+            except OSError as e:
+                note = _note(f"Hold Position failed to start: {e} (port may still be releasing)")
+        arrow_html, hsv_html = _hold_views_html()
+        return (note, arrow_html, hsv_html) + _ui_sync()
 
 
-def flow_set_roi(v):       stabilizer.roi_fraction = float(v);    return _note(f"roi_fraction={v}")
-def flow_set_deadband(v):  stabilizer.deadband_px = float(v);     return _note(f"deadband_px={v}")
-def flow_set_gain(v):      stabilizer.gain = float(v);            return _note(f"gain={v}")
-def flow_set_maxcorr(v):   stabilizer.max_correction = int(v);    return _note(f"max_correction={v}")
-def flow_set_smooth(v):    stabilizer.smoothing_alpha = float(v); return _note(f"smoothing_alpha={v}")
-def flow_set_flip_roll(v): stabilizer.flip_roll = bool(v);        return _note(f"flip_roll={v}")
-def flow_set_flip_thr(v):  stabilizer.flip_throttle = bool(v);    return _note(f"flip_throttle={v}")
+def _log_param(name, value):
+    """Record a live tuning change into every active session log, so the JSONL
+    fully explains later corrections — not just the transient UI note list."""
+    for p in (processor, demo_processor):
+        if p is not None:
+            p.logger.log({"event": "param_change", "param": name, "value": value})
 
 
-def flow_set_mode(mode):
+def flow_set_roi(v):       stabilizer.roi_fraction = float(v);    _log_param("roi_fraction", float(v));    return _note(f"roi_fraction={v}")
+def flow_set_deadband(v):  stabilizer.deadband_px = float(v);     _log_param("deadband_px", float(v));     return _note(f"deadband_px={v}")
+def flow_set_flip_roll(v): stabilizer.flip_roll = bool(v);        _log_param("flip_roll", bool(v));        return _note(f"flip_roll={v}")
+def flow_set_flip_thr(v):  stabilizer.flip_throttle = bool(v);    _log_param("flip_throttle", bool(v));    return _note(f"flip_throttle={v}")
+
+
+def flow_set_roll_enabled(v):
     if processor is not None:
-        processor.pulsed = (mode == "Pulsed (recommended)")
-    return _note(f"actuation mode = {mode}")
+        processor.roll_enabled = bool(v)
+    _log_param("roll_enabled", bool(v))
+    return _note(f"roll_enabled={v}")
+
+
+def flow_set_throttle_enabled(v):
+    if processor is not None:
+        processor.throttle_enabled = bool(v)
+    _log_param("throttle_enabled", bool(v))
+    return _note(f"throttle_enabled={v}")
+
+
+def flow_set_hold_threshold(v):
+    if processor is not None:
+        processor.hold_threshold_px = float(v)
+    _log_param("hold_threshold_px", float(v))
+    return _note(f"hold_threshold_px={v}")
+
+
+def flow_set_hold_settle(v):
+    if processor is not None:
+        processor.hold_settle_s = float(v)
+    _log_param("hold_settle_s", float(v))
+    return _note(f"hold_settle_s={v}")
 
 
 # ── Diagnostics: live numbers, plot, corrections table ──────────────────────
 
 _EMPTY_PLOT = pd.DataFrame({"t": [], "value": [], "series": []})
-_EMPTY_CORR = pd.DataFrame(columns=_CORR_COLUMNS)
 
 
 def poll_hold_stats():
@@ -309,9 +400,10 @@ def poll_hold_stats():
     c = processor.last_corr
     return (f"frames={processor.frames_processed}  compute={c.compute_ms:.2f}ms  "
             f"src_fps={processor.source.fps:.1f}\n"
-            f"raw    dx={c.raw_dx:+.2f} dy={c.raw_dy:+.2f}\n"
-            f"smooth dx={c.flow_dx:+.2f} dy={c.flow_dy:+.2f}  valid={c.valid}\n"
-            f"corr   roll={c.roll_delta:+d}  throttle={c.throttle_delta:+d}")
+            f"raw  dx={c.raw_dx:+.2f} dy={c.raw_dy:+.2f}\n"
+            f"flow dx={c.flow_dx:+.2f} dy={c.flow_dy:+.2f}  valid={c.valid}  coherent={c.coherent}\n"
+            f"cumulative displacement  dx={c.cum_dx:+.1f}px  dy={c.cum_dy:+.1f}px  "
+            f"(threshold={processor.hold_threshold_px:.0f}px)")
 
 
 def poll_hold_plot():
@@ -322,23 +414,13 @@ def poll_hold_plot():
         return _EMPTY_PLOT
     t0 = pts[0][0]
     rows = []
-    for (t, dx, dy, roll, thr) in pts:
+    for (t, dx, dy, cum_dx, cum_dy) in pts:
         rel = t - t0
-        rows.append((rel, dx, "drift dx"))
-        rows.append((rel, dy, "drift dy"))
-        rows.append((rel, roll, "roll corr"))
-        rows.append((rel, thr, "throttle corr"))
+        rows.append((rel, dx, "flow dx"))
+        rows.append((rel, dy, "flow dy"))
+        rows.append((rel, cum_dx, "cum dx"))
+        rows.append((rel, cum_dy, "cum dy"))
     return pd.DataFrame(rows, columns=["t", "value", "series"])
-
-
-def poll_corrections_table():
-    if processor is None:
-        return _EMPTY_CORR
-    rows = processor.corrections_snapshot()
-    if not rows:
-        return _EMPTY_CORR
-    df = pd.DataFrame(rows, columns=_CORR_COLUMNS)
-    return df.iloc[::-1].head(50)  # newest first, capped
 
 
 def poll_event_log():
@@ -411,26 +493,50 @@ def _demo_button():
 
 def do_toggle_demo(webcam_idx):
     global demo_processor
-    if demo_processor is not None:
-        demo_processor.stop()
-        demo_processor = None
-        note = _note("Webcam demo stopped.")
-    else:
-        src = WebcamFrameSource(index=int(webcam_idx), width=640, height=360)
-        proc = FlowProcessor(src, stabilizer, drone=None, logger=FlowLogger(),
-                             arrow_port=DEMO_ARROW_PORT, hsv_port=DEMO_HSV_PORT)
-        try:
-            proc.start()
-        except OSError as e:
-            note = _note(f"Demo failed to bind stream servers: {e}")
-            return (note,) + _demo_views_html() + (_demo_button(),)
-        if getattr(src, "open_error", None):
-            proc.stop()
-            note = _note(f"Webcam error: {src.open_error}")
-            return (note,) + _demo_views_html() + (_demo_button(),)
-        demo_processor = proc
-        note = _note(f"Webcam demo started (index {int(webcam_idx)}).")
-    return (note,) + _demo_views_html() + (_demo_button(),)
+    with _ui_lock:  # serialize toggles — no double-start race
+        if demo_processor is not None:
+            demo_processor.stop()
+            demo_processor = None
+            note = _note("Webcam demo stopped.")
+        elif _holding():
+            note = _note("Ignored 'START DEMO' — Hold Position is engaged. Release "
+                         "Hold Position first (shared stabilizer can't drive two live "
+                         "sources at once).")
+        else:
+            src = WebcamFrameSource(index=int(webcam_idx), width=640, height=360)
+            proc = FlowProcessor(src, stabilizer, drone=None, logger=FlowLogger(),
+                                 arrow_port=DEMO_ARROW_PORT, hsv_port=DEMO_HSV_PORT)
+            try:
+                proc.start()
+            except OSError as e:
+                note = _note(f"Demo failed to bind stream servers: {e}")
+                return (note,) + _demo_views_html() + (_demo_button(),)
+            if getattr(src, "open_error", None):
+                proc.stop()
+                note = _note(f"Webcam error: {src.open_error}")
+                return (note,) + _demo_views_html() + (_demo_button(),)
+            demo_processor = proc
+            note = _note(f"Webcam demo started (index {int(webcam_idx)}).")
+        return (note,) + _demo_views_html() + (_demo_button(),)
+
+
+def do_reset_origin():
+    """Mark the current view as 'home' — zeroes the cumulative drift estimate
+    without interrupting flow tracking. Shared stabilizer, so this affects
+    whichever of Hold Position / Demo is currently running."""
+    stabilizer.reset_origin()
+    for p in (processor, demo_processor):
+        if p is not None:
+            p.logger.log({"event": "origin_reset"})
+    return _note("Origin reset — current view marked as home (cumulative drift zeroed).")
+
+
+def poll_demo_drift():
+    if demo_processor is None:
+        return "cumulative drift: demo not running"
+    c = demo_processor.last_corr
+    return (f"cumulative drift since origin:  dx={c.cum_dx:+.1f}px  dy={c.cum_dy:+.1f}px  "
+            f"(|d|={(c.cum_dx**2 + c.cum_dy**2)**0.5:.1f}px)")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -489,14 +595,19 @@ with gr.Blocks(title="DM002HW — Controller") as demo:
                         with gr.Row():
                             roi_s = gr.Slider(0.2, 1.0, value=stabilizer.roi_fraction, step=0.05, label="ROI fraction")
                             dead_s = gr.Slider(0.0, 3.0, value=stabilizer.deadband_px, step=0.1, label="Deadband px")
-                            gain_s = gr.Slider(0.1, 10.0, value=stabilizer.gain, step=0.1, label="Gain")
-                            max_s = gr.Slider(1, 40, value=stabilizer.max_correction, step=1, label="Max correction")
-                            smooth_s = gr.Slider(0.05, 1.0, value=stabilizer.smoothing_alpha, step=0.05, label="Smoothing α")
                         with gr.Row():
                             flip_roll_c = gr.Checkbox(value=False, label="Flip roll sign")
                             flip_thr_c = gr.Checkbox(value=False, label="Flip throttle sign")
-                            mode_r = gr.Radio(["Pulsed (recommended)", "Continuous"],
-                                              value="Pulsed (recommended)", label="Actuation mode")
+                        gr.Markdown("**Displacement Hold** — fires one fixed nudge when accumulated "
+                                   "drift crosses the threshold, then holds neutral for a settle "
+                                   "window before checking again.")
+                        with gr.Row():
+                            roll_en_c = gr.Checkbox(value=True, label="Roll correction enabled")
+                            thr_en_c = gr.Checkbox(value=False, label="Throttle correction enabled")
+                        hold_threshold_s = gr.Slider(2, 40, value=10, step=1,
+                                                     label="Displacement Hold: threshold (px)")
+                        hold_settle_s_slider = gr.Slider(0.5, 10, value=2.0, step=0.5,
+                                                         label="Displacement Hold: settle time (s, neutral between fires)")
 
                     status = gr.Textbox(label="Status log", lines=10, interactive=False)
 
@@ -567,19 +678,28 @@ with gr.Blocks(title="DM002HW — Controller") as demo:
         with gr.Tab("🌊 Optical Flow — Demo"):
             gr.Markdown(
                 "### Webcam-only demo / debug sandbox\n"
-                "Tune gain / deadband / signs against your webcam before trusting them on the "
+                "Tune deadband / ROI / signs against your webcam before trusting them on the "
                 "real drone — this shares the same tuning as Hold Position on the Controller tab. "
-                "No drone or video code lives here."
+                "No drone or video code lives here.\n\n"
+                "**Position estimate (red marker)** — the cyan arrow only shows *velocity* and "
+                "vanishes the instant motion stops. The red cross+dot is the cumulative "
+                "**position**: it stays wherever you've drifted to since the last 'Mark home' "
+                "click, even while completely still. This is the estimator step — no corrections "
+                "are sent from this tab."
             )
             demo_webcam_idx = gr.Number(value=0, label="Webcam index", precision=0)
-            demo_btn = gr.Button("▶ START DEMO (webcam)")
+            with gr.Row():
+                demo_btn = gr.Button("▶ START DEMO (webcam)")
+                demo_reset_btn = gr.Button("🏠 Mark home (reset origin)")
             with gr.Row():
                 demo_arrow_view = gr.HTML(_demo_placeholder("🡒 Motion Arrows — demo stopped"))
                 demo_hsv_view = gr.HTML(_demo_placeholder("🌈 Dense Field (HSV) — demo stopped"))
+            demo_drift = gr.Textbox(label="Cumulative drift (position estimate)", interactive=False)
             demo_status = gr.Textbox(label="Demo status", lines=3, interactive=False)
 
     # ── wiring ────────────────────────────────────────────────────────────
-    connect_btn.click(do_toggle_connect, outputs=[status, video_feed, connect_btn, start_video_btn, hold_btn, status_badge])
+    connect_btn.click(do_toggle_connect, inputs=[vid_w, vid_h, vid_color],
+                      outputs=[status, video_feed, connect_btn, start_video_btn, hold_btn, status_badge])
     start_video_btn.click(do_toggle_video, inputs=[vid_w, vid_h, vid_color],
                           outputs=[status, video_feed, connect_btn, start_video_btn, hold_btn, status_badge])
     hold_btn.click(do_toggle_hold, outputs=[status, hold_arrow_view, hold_hsv_view,
@@ -607,25 +727,68 @@ with gr.Blocks(title="DM002HW — Controller") as demo:
 
     roi_s.release(flow_set_roi, roi_s, status)
     dead_s.release(flow_set_deadband, dead_s, status)
-    gain_s.release(flow_set_gain, gain_s, status)
-    max_s.release(flow_set_maxcorr, max_s, status)
-    smooth_s.release(flow_set_smooth, smooth_s, status)
     flip_roll_c.change(flow_set_flip_roll, flip_roll_c, status)
     flip_thr_c.change(flow_set_flip_thr, flip_thr_c, status)
-    mode_r.change(flow_set_mode, mode_r, status)
+    roll_en_c.change(flow_set_roll_enabled, roll_en_c, status)
+    thr_en_c.change(flow_set_throttle_enabled, thr_en_c, status)
+    hold_threshold_s.release(flow_set_hold_threshold, hold_threshold_s, status)
+    hold_settle_s_slider.release(flow_set_hold_settle, hold_settle_s_slider, status)
 
     demo_btn.click(do_toggle_demo, inputs=demo_webcam_idx,
                    outputs=[demo_status, demo_arrow_view, demo_hsv_view, demo_btn])
+    demo_reset_btn.click(do_reset_origin, outputs=demo_status)
 
     timer = gr.Timer(0.4)
     timer.tick(poll_video_stats, outputs=video_stats)
     timer.tick(poll_hold_stats, outputs=hold_stats)
     timer.tick(poll_hold_plot, outputs=hold_plot)
     timer.tick(poll_event_log, outputs=status)
-    timer.tick(lambda: (_connect_button(), _video_button(), _hold_button(), poll_status()),
-              outputs=[connect_btn, start_video_btn, hold_btn, status_badge])
+    timer.tick(poll_demo_drift, outputs=demo_drift)
+    timer.tick(_poll_sync,
+               outputs=[video_feed, hold_arrow_view, hold_hsv_view,
+                        connect_btn, start_video_btn, hold_btn, status_badge])
 
 demo.queue()
 
+
+def shutdown(*_args):
+    """Tear the whole tree down so nothing survives process exit: Hold Position
+    loop, video + every MJPEG server, the webcam demo, and the drone control
+    thread — then release the log-file handles (a held handle is what blocks
+    deleting app_logs/ on Windows). Idempotent; safe to call more than once."""
+    global demo_processor
+    log.info("Shutting down — tearing down all threads/servers.")
+    try:
+        _teardown_connection("app shutdown")  # cascades hold -> video -> drone
+    except Exception as e:  # noqa: BLE001 — never let cleanup raise on the way out
+        log.error("teardown_connection during shutdown failed: %s", e)
+    if demo_processor is not None:
+        try:
+            demo_processor.stop()
+        except Exception as e:  # noqa: BLE001
+            log.error("demo_processor.stop during shutdown failed: %s", e)
+        demo_processor = None
+    close_logging()
+
+
+# Backstop: runs on any normal interpreter exit even if launch() returns oddly.
+atexit.register(shutdown)
+
+
+def _signal_shutdown(signum, _frame):
+    shutdown()
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
-    demo.launch(css=CSS)
+    # SIGTERM isn't delivered as KeyboardInterrupt; handle it explicitly so a
+    # kill (or IDE stop) still tears everything down. SIGINT (Ctrl-C) surfaces
+    # as KeyboardInterrupt and is handled by the try/finally below.
+    try:
+        signal.signal(signal.SIGTERM, _signal_shutdown)
+    except (ValueError, AttributeError, OSError):
+        pass  # not on main thread / not supported on this platform
+    try:
+        demo.launch(css=CSS)
+    finally:
+        shutdown()

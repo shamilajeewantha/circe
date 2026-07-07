@@ -61,3 +61,19 @@ def _configure():
 def get_logger(name: str) -> logging.Logger:
     _configure()
     return logging.getLogger(f"dm002hw.{name}")
+
+
+def close_logging():
+    """Flush and close every file handler so the OS releases the lock on the
+    log file — on Windows an open RotatingFileHandler keeps app_logs/ from
+    being deletable. Called from main.py's shutdown() on exit."""
+    global _configured
+    root = logging.getLogger("dm002hw")
+    for handler in list(root.handlers):
+        try:
+            handler.flush()
+            handler.close()
+        except Exception:
+            pass
+        root.removeHandler(handler)
+    _configured = False

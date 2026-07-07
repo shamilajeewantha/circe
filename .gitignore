@@ -21,3 +21,9 @@ DM002HW_controller_tests/video_debug/
 
 # applog.py runtime log file — generated, not source
 DM002HW_controller_tests/app_logs/
+
+# Optical-flow controller (circe_v1) runtime output — generated, not source.
+# Anywhere these appear: flow session logs/frames, video debug captures, app logs.
+flow_debug/
+video_debug/
+app_logs/
