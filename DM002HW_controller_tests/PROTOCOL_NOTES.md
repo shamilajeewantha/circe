@@ -12,18 +12,33 @@ That capture appears to have been shot at night (most frames decode near-black).
   `drone.py`, no open issues.
 - **Video streaming**: **confirmed working live** — a real session
   (`gradio_test3.pcapng`) streamed 258 frames continuously over 37.7
-  seconds, plus several more good runs in the same session. The fix that
-  got it there: `Drone.set_idle_mode()` (disarmed/idle state matching the
-  real app, not continuously armed) + decoupling the `ctr2`/`ctr3` counter
-  fields from the main counter (they must keep advancing at ~6.9Hz even
-  while the main counter freezes) + resetting all counter state at the top
-  of every `connect()` (not just `__init__`, which was silently breaking
-  every reconnect within the same process). See "CONTROL-CHANNEL FINDING"
-  and "ctr2/ctr3 decoupling" sections below for the evidence.
+  seconds, plus several more good runs in the same session.
+  - **UPDATE 2026-07-08 — read "FLIGHT-WITH-VIDEO FINDING" below; it corrects
+    the emphasis here.** The real cause of our armed-mode stall was **packet
+    RATE**, not arm state: `drone.py` sent an 88+124 packet pair at 50 Hz
+    (~100 pkt/s), ~5.7× the real app's ~18 pkt/s (124-byte-only). The real
+    app is *armed the whole flight* and video is fine. Fix: `_loop()` now
+    sends 124-byte-only at ~18 Hz. `set_idle_mode` is no longer required for
+    video (and must never be force-restored mid-flight — that's a disarm).
+  - The earlier fix chain still holds as contributing factors: decoupling the
+    `ctr2`/`ctr3` counter fields from the main counter (they keep advancing at
+    ~6 Hz even while `ctr1` freezes) + resetting all counter state at the top
+    of every `connect()` (not just `__init__`, which was silently breaking
+    every reconnect within the same process). See "CONTROL-CHANNEL FINDING"
+    and "ctr2/ctr3 decoupling" sections below for the evidence.
   - Ignore the "FREE-RUNNING stream ... recovered by a 'kick'" section
     below — that was a real hypothesis, live-tested, and **disproven** (see
     "Live-tested and disproven hypotheses"). It's kept for the record, not
     because it's the current answer.
+- **Gyro / tilt "smooth control" mode is PURELY CLIENT-SIDE (2026-07-08)** —
+  see "GYRO/TILT-MODE FINDING" below. The phone app's gyro button (fine, smooth
+  tilt-to-fly with good hover) sends the **exact same protocol we already use**
+  (`cmd=0x40`, 124-byte, ~18–20 Hz); there is **no drone-side gyro-mode byte**.
+  The only difference is the phone streams a *continuous* fine spread of axis
+  values (55–61 distinct values/axis, drifting ±1–3 every ~50 ms around 0x80)
+  instead of our 1-second discrete button pulses (96/128/160). Replicated in
+  both apps via `analog_control.py` (a browser joystick → `set_controls()` at
+  ~20 Hz). No protocol change required.
 - **Video display in the Gradio UI**: rewritten from polling (`gr.Image` +
   `gr.Timer`, capped at 2.5fps, dropped most frames) to push-based
   MJPEG-over-HTTP (`video_stream.MjpegServer` + an `<img>` tag). Verified
@@ -572,6 +587,110 @@ after failing:
 Also ruled out: WiFi signal quality (checked via `netsh wlan show
 interfaces` during a live test — 100% signal, RSSI -35dBm, i.e. excellent;
 not a link-quality issue).
+
+### FLIGHT-WITH-VIDEO FINDING (2026-07-08, `flight_with_video.pcapng`) — the real root cause: PACKET RATE, not arm state
+
+This is the most important video finding to date and it **corrects the
+emphasis of the "CONTROL-CHANNEL FINDING" above.** Every prior "healthy
+video" capture (`newtest.pcapng`, `gradio_test3.pcapng`) was shot with the
+drone **grounded / sticks untouched**, so the app was idle/disarmed — which
+made "disarmed" *look* like a video prerequisite. It isn't.
+
+`flight_with_video.pcapng` is the first capture of the **real app streaming
+video while actually flying** (laptop-relay method, phone running the real
+WiFi UAV app: takeoff → move commands → land, video on throughout). It
+contains **two clean, continuous flight-with-video windows** — t≈8–77s and
+t≈270–330s, ~60–70s each, hundreds of complete JPEG frames per window with
+no gap over ~0.7s. Decoded via `pcap_analyzer.py`:
+
+- **The app is ARMED the entire flight and video is perfectly healthy.**
+  During the healthy window `cmd=0x40` (armed) dominates (idle `cmd=0` only
+  appears in the first few seconds pre-takeoff, exactly like our
+  `set_idle_mode` grounded state). **Being continuously armed does NOT stall
+  video.** The whole "must send `cmd=0`/disarmed to keep video alive" theory
+  was an artifact of only ever having grounded captures.
+- **The app sends 124-byte "long" packets EXCLUSIVELY during flight+video**
+  — zero 88-byte short packets in either healthy window (across the whole
+  capture 88/108/152-byte variants appear only during connect/reconnect
+  storms, never in the streaming steady state).
+- **Rate: ctr1 ≈ 17.6 Hz, ctr2/ctr3 ≈ 6.2 Hz (decoupled)** — i.e. ~18–20
+  long packets/sec total.
+- **Our `drone.py` 124-byte `_build(long=True)` output is byte-for-byte
+  IDENTICAL to the real app's flight packet** (verified against a real armed
+  mid-flight packet: zero differing offsets). The packet *content* was never
+  wrong.
+
+**So the actual cause of our "stalls after ~7 frames while armed" was packet
+RATE/COUNT, not arm state and not packet content:** `drone.py`'s `_loop()`
+sent an 88-byte + 124-byte pair *every* iteration at 50 Hz = ~100 packets/s,
+~5.7× the real app's ~18 packets/s, flooding the shared control/video socket
+and starving the video RX. (This also explains why `set_idle_mode` "helped"
+earlier — cmd=0/frozen-ctr1 was incidental; what mattered was that the idle
+path still only mattered while grounded, and the real differentiator we were
+missing is here.)
+
+**Fix (2026-07-08, `drone.py._loop`)**: send **only** the 124-byte long
+packet, at **~18 Hz** (`time.sleep(0.055)`), matching the real app's flight
+cadence exactly (verified offline: emits 124-byte-only at 18.7 Hz, ctr1 18.0
+Hz, ctr2 6.7 Hz). No change to packet content, arm/cmd handling, or the
+`set_idle_mode` machinery (idle-on-connect still harmlessly mirrors the real
+app's grounded pre-takeoff state; it is simply **no longer required** for
+video, and must never be force-restored mid-flight — that forces `cmd=0` =
+disarm, the dangerous bug reverted in `circe_v1`). **Live-confirmed 2026-07-08**
+(connect → takeoff → fly with video: no stall after commands, "works good
+enough" per operator), and the same 124-byte-only/~18 Hz `_loop` change has now
+been **ported to `circe_v1/optical_flow_control/drone.py`** (both `drone.py`
+copies are byte-identical again).
+
+### GYRO/TILT-MODE FINDING (2026-07-08, `flight_with_video.pcapng`) — the phone's smooth "gyro" control is CLIENT-SIDE ONLY
+
+The DM002HW phone app has a gyro button: press it (does a gyro calibration),
+then **tilt the phone to fly** — noticeably smoother, finer movements and much
+better hover than the on-screen buttons. Question was whether that mode has a
+distinct packet signature we were missing. Analysed the control channel of
+`flight_with_video.pcapng` (the gyro-enabled capture) vs. our button-based
+`gradio_test*.pcapng` with `pcap_analyzer.py`:
+
+- **Continuous vs discrete axis values IS the whole story.** The gyro capture
+  streams a near-continuous fine spread per axis — **roll 55, pitch 61,
+  throttle 48, yaw 33 distinct values**, drifting **±1–3 every ~50 ms** around
+  neutral 0x80 (e.g. pitch 109→110→111→106→114→106→104→103… over consecutive
+  packets). Our app only ever sends the coarse discrete steps (96 / 128 / 160)
+  from 1-second button pulses. That fine analog spread is the accelerometer-tilt
+  fingerprint, and it is the *only* difference.
+- **No drone-side mode byte.** The tilt packets use plain `cmd=0x40` (armed) —
+  the identical byte we already send. No cmd value, outer-header byte, or packet
+  subtype flips between "gyro on" and button mode. The header length byte just
+  co-varies with packet size. There is no separate calibrate/mode packet type in
+  the flight capture (no `cmd=0x80` calibrate event is even present in it).
+- **Same rate/cadence** as any armed flight (~18–20 Hz, 124-byte long packets);
+  the fine motion comes from the axis *values* changing packet-to-packet, not
+  from any rate or counter change.
+
+**Conclusion:** the phone maps its accelerometer tilt to fine analog axis bytes
+and streams the **same protocol we already use** — there is nothing drone-side to
+enable. **Replicated** in both apps by `analog_control.py`: a browser
+virtual-joystick posts held stick positions to a local side-channel HTTP server
+(`AnalogInputServer`, same idiom as `video_stream.MjpegServer`) at ~20 Hz, which
+forwards them straight into `Drone.set_controls()`. A watchdog forces neutral if
+the joystick stops posting. Composes with the generation-counter arbitration in
+`drone.py` (see below) for free. Whether flight actually *feels* smoother, and
+the axis sign convention (there are per-axis invert checkboxes for this), are the
+only live-drone unknowns.
+
+### STATE-ARBITRATION FIX (2026-07-08, `drone.py` generation counter)
+
+A code review of the concurrent Gradio handlers found two safety bugs from
+flight commands doing `set_controls(...); time.sleep(...); hover()` in the
+handler thread: a move's terminal `hover()` (which sets `_cmd=CMD_ARMED`) could
+fire *after* an E-STOP and re-arm the drone, and a concurrent move's `hover()`
+could truncate a Land/Takeoff/Calibrate. Fixed with a **generation counter** in
+`Drone`: every authoritative write (`set_controls`/`hover`/`takeoff`/`land`/
+`calibrate`/`stop`) bumps `_gen` under `_state_lock` and returns a token; a timed
+command captures its token before sleeping and only applies its terminal revert
+if `_gen` is unchanged and still armed — so E-stop, a newer command, or a
+disconnect cancels a stale revert. E-stop is an ungated bump (never blockable).
+Verified offline (e-stop-vs-move, land-vs-move, disconnect-mid-move all pass).
 
 ## Analysis tools
 

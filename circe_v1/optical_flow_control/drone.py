@@ -88,6 +88,17 @@ class Drone:
         self._armed    = False
         self.last_error = None
         self._idle_mode = False
+        # Command arbitration (generation counter). Every "authoritative" write
+        # (set_controls/hover/takeoff/land/calibrate/stop) bumps _gen under
+        # _state_lock and returns the new value as a token. A timed command
+        # (moves, takeoff/land/calibrate) captures its token before sleeping and
+        # only applies its terminal revert-to-neutral/ARMED if _gen is unchanged
+        # — so a newer command, an e-stop, or a disconnect cancels a stale
+        # revert. Fixes: e-stop being silently undone by a later move's hover(),
+        # and land/takeoff/calibrate truncated by a concurrent move's hover().
+        self._state_lock = threading.Lock()
+        self._gen = 0
+        self._disconnect_event = threading.Event()
 
     def set_idle_mode(self, enabled: bool):
         """Video-streaming aid: the real WiFi UAV app spends ~95% of a
@@ -113,7 +124,9 @@ class Drone:
                     roll = pitch = throttle = yaw = 0
                     cmd = 0
                 else:
-                    roll, pitch, throttle, yaw, cmd = self._roll, self._pitch, self._throttle, self._yaw, self._cmd
+                    with self._state_lock:  # atomic snapshot — no torn read vs. a command write
+                        roll, pitch, throttle, yaw, cmd = (self._roll, self._pitch,
+                                                           self._throttle, self._yaw, self._cmd)
 
                 now = time.time()
                 if self._last_long_tick is None:
@@ -122,10 +135,20 @@ class Drone:
                 self._last_long_tick = now
                 long_ctr = int(self._long_counter)
 
-                # Alternate short / long packets exactly as the app does
-                self.sock.sendto(_build(self._counter, roll, pitch,
-                                        throttle, yaw, cmd,
-                                        long=False), (self.ip, self.port))
+                # Send ONLY the 124-byte "long" packet, at ~18 Hz. A fresh
+                # flight-with-video capture (flight_with_video.pcapng, see
+                # PROTOCOL_NOTES.md "flight-with-video") proved the real app,
+                # while ARMED and actively flying, streams video continuously
+                # (two clean 60-70s windows) using 124-byte packets EXCLUSIVELY
+                # — zero 88-byte short packets in the healthy window — with ctr1
+                # advancing at ~17.6 Hz and ctr2/ctr3 decoupled at ~6 Hz. Our
+                # 124-byte build is already byte-for-byte identical to the real
+                # app's flight packet (verified). This loop previously sent an
+                # 88+124 pair every iteration at 50 Hz — ~5.7x the packet rate
+                # the real app uses — flooding the shared control/video socket
+                # and starving the video RX, which is the actual cause of the
+                # "video stalls after a few commands" stall (NOT being armed;
+                # the real app is armed the whole flight and video is fine).
                 self.sock.sendto(_build(self._counter, roll, pitch,
                                         throttle, yaw, cmd,
                                         long=True, long_counter=long_ctr),  (self.ip, self.port))
@@ -137,7 +160,7 @@ class Drone:
                 break
             if not self._idle_mode:
                 self._counter += 1
-            time.sleep(0.02)   # 50 Hz
+            time.sleep(0.055)   # ~18 Hz, matching the real app's flight cadence
 
     def connect(self):
         # A previous disconnect() closed the old socket — always start fresh
@@ -157,6 +180,12 @@ class Drone:
         self._counter = 0
         self._long_counter = 0.0
         self._last_long_tick = None
+        # Fresh session: re-enable interruptible sleeps and invalidate any
+        # command left sleeping from a previous connection (its stale revert
+        # will find _gen changed and no-op).
+        self._disconnect_event.clear()
+        with self._state_lock:
+            self._gen += 1
 
         # Step 1: handshake
         log.info("Sending handshake to %s:%s...", self.ip, self.port)
@@ -179,6 +208,11 @@ class Drone:
         log.info("Connected — sending to %s:%s", self.ip, self.port)
 
     def disconnect(self):
+        # Wake any command mid-sleep and invalidate its pending revert so it
+        # can't fire on this (or the next) session.
+        self._disconnect_event.set()
+        with self._state_lock:
+            self._gen += 1
         self._running = False
         if self._thread:
             self._thread.join(timeout=1)
@@ -199,74 +233,131 @@ class Drone:
         self._armed = False
         log.info("Disconnected")
 
+    # ── command arbitration primitives ───────────────────────────────────────
+
+    def _write_axes(self, roll=NEUTRAL, pitch=NEUTRAL, throttle=NEUTRAL,
+                    yaw=NEUTRAL, cmd=None) -> int:
+        """Authoritative axis (and optional cmd) write. Bumps the generation
+        counter and returns the new token."""
+        with self._state_lock:
+            self._roll     = max(0, min(255, roll))
+            self._pitch    = max(0, min(255, pitch))
+            self._throttle = max(0, min(255, throttle))
+            self._yaw      = max(0, min(255, yaw))
+            if cmd is not None:
+                self._cmd = cmd
+            self._gen += 1
+            return self._gen
+
+    def _write_cmd(self, cmd) -> int:
+        """Authoritative cmd-only write (axes untouched). Bumps _gen."""
+        with self._state_lock:
+            self._cmd = cmd
+            self._gen += 1
+            return self._gen
+
+    def _revert_if_current(self, token: int, *, axes: bool, cmd=CMD_ARMED) -> bool:
+        """Terminal revert for a timed command — applies ONLY if no newer
+        authoritative write happened since `token` and we're still armed, so a
+        stale command can never clobber an e-stop, a newer command, or a fresh
+        session. Returns whether it applied."""
+        with self._state_lock:
+            if self._gen != token or not self._armed:
+                return False
+            if axes:
+                self._roll = self._pitch = self._throttle = self._yaw = NEUTRAL
+            self._cmd = cmd
+            self._gen += 1
+            return True
+
+    def _interruptible_sleep(self, duration: float) -> bool:
+        """Sleep that returns early (False) if a disconnect fires meanwhile."""
+        return not self._disconnect_event.wait(timeout=duration)
+
     # ── flight controls ───────────────────────────────────────────────────────
 
     def set_controls(self, roll=NEUTRAL, pitch=NEUTRAL,
-                     throttle=NEUTRAL, yaw=NEUTRAL):
-        self._roll     = max(0, min(255, roll))
-        self._pitch    = max(0, min(255, pitch))
-        self._throttle = max(0, min(255, throttle))
-        self._yaw      = max(0, min(255, yaw))
+                     throttle=NEUTRAL, yaw=NEUTRAL) -> int:
+        return self._write_axes(roll, pitch, throttle, yaw)
 
-    def hover(self):
-        self.set_controls()
-        self._cmd = CMD_ARMED
+    def hover(self) -> int:
+        # Authoritative — always applies (centers sticks, cmd=ARMED).
+        return self._write_axes(cmd=CMD_ARMED)
 
     def takeoff(self):
         log.info("Takeoff")
-        self._cmd = CMD_TAKEOFF
-        time.sleep(0.5)
-        self._cmd = CMD_ARMED
+        token = self._write_cmd(CMD_TAKEOFF)
+        self._interruptible_sleep(0.5)
+        self._revert_if_current(token, axes=False)
 
     def land(self):
         log.info("Land")
-        self._cmd = CMD_LAND
-        time.sleep(0.5)
-        self._cmd = CMD_ARMED
+        token = self._write_cmd(CMD_LAND)
+        self._interruptible_sleep(0.5)
+        self._revert_if_current(token, axes=False)
 
     def stop(self):
         log.warning("Emergency stop")
-        self._cmd = CMD_STOP
+        self._write_cmd(CMD_STOP)   # unconditional, ungated — never blockable
 
     def calibrate(self):
         log.info("Calibrating gyro (keep flat)...")
-        self._cmd = CMD_CALIBRATE
-        time.sleep(1.0)
-        self._cmd = CMD_ARMED
+        token = self._write_cmd(CMD_CALIBRATE)
+        self._interruptible_sleep(1.0)
+        self._revert_if_current(token, axes=False)
 
     # ── movements (duration in seconds) ──────────────────────────────────────
 
+    # Each timed move captures its write token, sleeps (interruptibly), then
+    # reverts to neutral ONLY if still current — see _revert_if_current.
+
     def up(self, duration=1.0, power=180):
         log.info("Up duration=%ss throttle=%s", duration, power)
-        self.set_controls(throttle=power); time.sleep(duration); self.hover()
+        token = self.set_controls(throttle=power)
+        self._interruptible_sleep(duration)
+        self._revert_if_current(token, axes=True)
 
     def down(self, duration=1.0, power=80):
         log.info("Down duration=%ss throttle=%s", duration, power)
-        self.set_controls(throttle=power); time.sleep(duration); self.hover()
+        token = self.set_controls(throttle=power)
+        self._interruptible_sleep(duration)
+        self._revert_if_current(token, axes=True)
 
     def forward(self, duration=1.0, power=160):
         log.info("Forward duration=%ss pitch=%s", duration, power)
-        self.set_controls(pitch=power); time.sleep(duration); self.hover()
+        token = self.set_controls(pitch=power)
+        self._interruptible_sleep(duration)
+        self._revert_if_current(token, axes=True)
 
     def backward(self, duration=1.0, power=96):
         log.info("Backward duration=%ss pitch=%s", duration, power)
-        self.set_controls(pitch=power); time.sleep(duration); self.hover()
+        token = self.set_controls(pitch=power)
+        self._interruptible_sleep(duration)
+        self._revert_if_current(token, axes=True)
 
     def turn_left(self, duration=1.0, power=63):
         log.info("Turn left duration=%ss yaw=%s", duration, power)
-        self.set_controls(yaw=power); time.sleep(duration); self.hover()
+        token = self.set_controls(yaw=power)
+        self._interruptible_sleep(duration)
+        self._revert_if_current(token, axes=True)
 
     def turn_right(self, duration=1.0, power=191):
         log.info("Turn right duration=%ss yaw=%s", duration, power)
-        self.set_controls(yaw=power); time.sleep(duration); self.hover()
+        token = self.set_controls(yaw=power)
+        self._interruptible_sleep(duration)
+        self._revert_if_current(token, axes=True)
 
     def move_left(self, duration=1.0, power=96):
         log.info("Move left duration=%ss roll=%s", duration, power)
-        self.set_controls(roll=power); time.sleep(duration); self.hover()
+        token = self.set_controls(roll=power)
+        self._interruptible_sleep(duration)
+        self._revert_if_current(token, axes=True)
 
     def move_right(self, duration=1.0, power=160):
         log.info("Move right duration=%ss roll=%s", duration, power)
-        self.set_controls(roll=power); time.sleep(duration); self.hover()
+        token = self.set_controls(roll=power)
+        self._interruptible_sleep(duration)
+        self._revert_if_current(token, axes=True)
 
 
 # ── demo ──────────────────────────────────────────────────────────────────────
