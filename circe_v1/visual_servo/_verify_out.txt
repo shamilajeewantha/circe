@@ -1,0 +1,5 @@
+camera opened: True
+frame captured: True  shape=(480, 640, 3)
+model loaded: True
+inference ok: True  took 3672.4ms  annotated shape=(480, 640, 3)
+detections: 0
