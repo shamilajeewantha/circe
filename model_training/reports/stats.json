@@ -1,0 +1,105 @@
+{
+  "n_samples": 59818,
+  "taxonomy": [
+    "concrete_crack",
+    "corrosion",
+    "fluid_patch",
+    "fire",
+    "smoke",
+    "gauge_face",
+    "efflorescence",
+    "exposed_rebar",
+    "spalling",
+    "loose_bolt",
+    "missing_bolt"
+  ],
+  "class_totals": {
+    "concrete_crack": 7814,
+    "corrosion": 2242,
+    "fluid_patch": 38847,
+    "fire": 15692,
+    "smoke": 18673,
+    "gauge_face": 9691,
+    "efflorescence": 808,
+    "exposed_rebar": 1500,
+    "spalling": 3796,
+    "loose_bolt": 531,
+    "missing_bolt": 437
+  },
+  "per_source_class": {
+    "corrosion__meee-aegk9": {
+      "corrosion": 693
+    },
+    "crack-corrosion__codebrim": {
+      "efflorescence": 808,
+      "corrosion": 1549,
+      "concrete_crack": 2937,
+      "spalling": 1883,
+      "exposed_rebar": 1500
+    },
+    "fire-smoke__ak-rfpt5": {
+      "fire": 6041,
+      "smoke": 5782
+    },
+    "fire-smoke__yolov5-u5mjv": {
+      "fire": 9651,
+      "smoke": 12891
+    },
+    "fluid-patch__cv-6rgre": {
+      "fluid_patch": 28814
+    },
+    "fluid-patch__kuanhan-fu": {
+      "fluid_patch": 934
+    },
+    "fluid-patch__project-5v4jq": {
+      "fluid_patch": 345
+    },
+    "fluid-patch__welding-defects": {
+      "fluid_patch": 8754
+    },
+    "gauge-face__dataset-qxuat": {
+      "gauge_face": 9262
+    },
+    "gauge-face__yolo-lxxyl": {
+      "gauge_face": 429
+    },
+    "kashita1crack-spall-detector": {
+      "spalling": 1913,
+      "concrete_crack": 3326
+    },
+    "uminho-gya54crack-detection-concrete-gphbn": {
+      "concrete_crack": 1551
+    },
+    "sdnet-loose_bolt": {
+      "loose_bolt": 529
+    },
+    "sdnet-missing_bolt": {
+      "missing_bolt": 437,
+      "loose_bolt": 2
+    },
+    "sdnet-fixed": {}
+  },
+  "orig_split_counts": {
+    "train": 47159,
+    "valid": 7268,
+    "test": 4565,
+    "coco": 826
+  },
+  "background_counts": {
+    "train": 2196,
+    "valid": 522,
+    "test": 342,
+    "coco": 304
+  },
+  "n_duplicates": 4750,
+  "dropped_boxes": {
+    "fire-smoke__ak-rfpt5 :: junk class 'Other' (people / watermarks / logos)": 5069,
+    "fluid-patch__kuanhan-fu :: phantom class 'object' (single box on a parked motorbike)": 1,
+    "gauge-face__dataset-qxuat :: needle/tick keypoint 'center' (not the gauge dial)": 9223,
+    "gauge-face__dataset-qxuat :: needle/tick keypoint 'tip' (not the gauge dial)": 9468,
+    "gauge-face__dataset-qxuat :: needle/tick keypoint 'max' (not the gauge dial)": 9194,
+    "gauge-face__dataset-qxuat :: needle/tick keypoint 'min' (not the gauge dial)": 9182,
+    "gauge-face__yolo-lxxyl :: keypoint 'Needle' (not the gauge dial)": 429,
+    "gauge-face__yolo-lxxyl :: keypoint 'Center' (not the gauge dial)": 429
+  }
+}

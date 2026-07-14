@@ -1,0 +1,211 @@
+<title>Circe inspection dataset — preliminary analysis</title>
+<style>
+  :root{
+    --bg:#F1F3F6; --surface:#FFFFFF; --surface2:#F7F9FB;
+    --ink:#191D23; --muted:#59626E; --line:#DDE2E9;
+    --accent:#B86A16; --kept:#2C7C6B; --drop:#AE4429;
+    --s0:#3C6E9E; --s1:#4E9C86; --s2:#C58A2E; --s3:#9A5BA8; --s4:#C6603F;
+    --s5:#6E8BB5; --s6:#4B9AA0; --s7:#B0894B; --s8:#7C7FA6; --s9:#A06A5C;
+    --radius:12px; --maxw:1000px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#12151A; --surface:#1B1F26; --surface2:#20252D;
+      --ink:#E8ECF1; --muted:#98A1AD; --line:#2B313A;
+      --accent:#DE9433; --kept:#4FB4A1; --drop:#D66A4C;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#12151A; --surface:#1B1F26; --surface2:#20252D;
+    --ink:#E8ECF1; --muted:#98A1AD; --line:#2B313A;
+    --accent:#DE9433; --kept:#4FB4A1; --drop:#D66A4C;
+  }
+  :root[data-theme="light"]{
+    --bg:#F1F3F6; --surface:#FFFFFF; --surface2:#F7F9FB;
+    --ink:#191D23; --muted:#59626E; --line:#DDE2E9;
+    --accent:#B86A16; --kept:#2C7C6B; --drop:#AE4429;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:56px 24px 80px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 14px}
+  h1{font-size:clamp(28px,4vw,44px);line-height:1.08;letter-spacing:-.02em;margin:0 0 14px;
+    text-wrap:balance;font-weight:700}
+  h2{font-size:22px;letter-spacing:-.01em;margin:0 0 4px;font-weight:650}
+  .lede{color:var(--muted);font-size:17px;max-width:62ch;margin:0}
+  .note{font-family:var(--mono);font-size:12.5px;color:var(--muted);background:var(--surface2);
+    border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;
+    padding:12px 14px;margin:26px 0 0}
+  section{margin-top:52px}
+  .sec-head{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);
+    padding-bottom:12px;margin-bottom:24px}
+  .sec-head .idx{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  p.desc{color:var(--muted);font-size:15px;margin:0 0 22px;max-width:64ch}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+  .tile{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+  .tile .k{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .tile .v{font-family:var(--mono);font-size:27px;font-weight:600;margin-top:8px;
+    font-variant-numeric:tabular-nums}
+  .tile .sub{font-size:12px;color:var(--muted);margin-top:2px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:22px}
+  .row{display:grid;grid-template-columns:130px 1fr 74px;align-items:center;gap:12px;padding:6px 0}
+  .row .lab{font-family:var(--mono);font-size:13px;text-align:right;color:var(--ink)}
+  .row .val{font-family:var(--mono);font-size:13px;text-align:right;color:var(--muted);
+    font-variant-numeric:tabular-nums}
+  .bar{height:20px;border-radius:5px;background:var(--surface2);overflow:hidden;display:flex}
+  .seg{height:100%;transition:width .8s cubic-bezier(.2,.7,.2,1)}
+  @media (prefers-reduced-motion:reduce){.seg{transition:none}}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:18px}
+  .legend span{font-family:var(--mono);font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .legend i{width:11px;height:11px;border-radius:3px;display:inline-block}
+  ul.findings{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:14px}
+  ul.findings li{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;padding-left:16px;position:relative}
+  ul.findings li b{color:var(--ink)}
+  ul.findings li.warn{border-left:3px solid var(--drop)}
+  ul.findings li.keep{border-left:3px solid var(--kept)}
+  ul.findings li.info{border-left:3px solid var(--accent)}
+  .tag{font-family:var(--mono);font-size:11px;padding:1px 7px;border-radius:20px;border:1px solid var(--line);
+    color:var(--muted);white-space:nowrap}
+  a{color:var(--accent)}
+  code{font-family:var(--mono);font-size:.9em;background:var(--surface2);padding:1px 5px;border-radius:4px}
+  footer{margin-top:60px;padding-top:20px;border-top:1px solid var(--line);
+    font-family:var(--mono);font-size:12px;color:var(--muted)}
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">Factory-floor inspection rover · dataset audit</p>
+  <h1>Merged detection dataset — composition, balance &amp; biases</h1>
+  <p class="lede">Nine defect/asset classes assembled from 10 source datasets for a ground inspection
+  robot. This is the pre-training audit: what the data is made of, where it is imbalanced, and what
+  was dropped and why.</p>
+  <div class="note">PRELIMINARY — counts are pre-deduplication and pre-resplit, computed directly from
+  the verified source labels. The full report (UMAP embedding map + per-class sample mosaics +
+  dedup-adjusted counts) is generated by <code>pipeline/make_report.py</code> after running the
+  FiftyOne pipeline in <code>drone_detect</code>.</div>
+
+  <section>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Class composition by source</h2></div>
+    <p class="desc">Each bar is one class; segments show which source dataset contributed the boxes.
+    Two things jump out: <b>fluid_patch, smoke and fire dominate</b>, and the structural classes
+    (<code>concrete_crack</code>, <code>efflorescence</code>, <code>exposed_rebar</code>,
+    <code>spalling</code>) come from a <b>single source</b> (CODEBRIM).</p>
+    <div class="card">
+      <div id="composition"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>What was dropped — and why</h2></div>
+    <p class="desc">Box-level drops (junk / wrong-target classes). Every dropped <i>image</i> is logged
+    per-file in <code>reports/dropped_images.csv</code>; whole excluded folders are listed below.</p>
+    <div class="card"><div id="drops"></div></div>
+    <ul class="findings" style="margin-top:16px">
+      <li class="warn"><span class="tag">excluded folder</span> &nbsp;<b>gauge-face__kaushal-bhide</b>
+        — 2,897 images. Needle-endpoint labels only; no whole-dial box, so it cannot train
+        <code>gauge_face</code> detection.</li>
+      <li class="warn"><span class="tag">excluded folder</span> &nbsp;<b>bolt-defects__ext-sdnet2025</b>
+        — external, non-YOLO (CSV/JSON); outside the 9-class taxonomy.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Biases &amp; caveats</h2></div>
+    <ul class="findings">
+      <li class="warn"><b>Severe class imbalance (~48×).</b> <code>fluid_patch</code> (38,847) vs
+        <code>efflorescence</code> (808). Use class weights / oversampling; expect the rare structural
+        classes to lag without more data.</li>
+      <li class="warn"><b>Single-source domain risk.</b> <code>concrete_crack</code> and all three
+        structural classes come only from CODEBRIM (outdoor infrastructure imagery) — the model may
+        overfit that domain. Collect factory-floor examples before deployment.</li>
+      <li class="keep"><b>Fire/smoke includes outdoor/wildfire scenes — kept on purpose.</b> Fire is
+        fire; the training data is not restricted to indoor. Documented here rather than pruned.</li>
+      <li class="warn"><b>Label quality.</b> <code>fluid-patch__welding-defects</code> had a verified
+        mislabel (a mouse pad boxed as oil) — flagged for spot-review. Junk classes
+        (<code>Other</code>, <code>object</code>, gauge keypoints) were dropped.</li>
+      <li class="info"><b>Not covered by any data:</b> damaged_conduit, exposed_wire,
+        broken_torque_seal, clogged_vent (and overheating). These need custom staging and are absent
+        from this merged set.</li>
+    </ul>
+  </section>
+
+  <footer>
+    Read-only sources in <code>datasets/</code> → curated by <code>pipeline/</code> (FiftyOne) →
+    <code>merged/</code> (YOLO, 9 classes) → train with <code>train.py</code> in
+    <code>drone_detect</code>.
+  </footer>
+</div>
+
+<script>
+const SOURCES = [
+  ["fluid-patch__cv-6rgre","--s0"],["fire-smoke__yolov5-u5mjv","--s1"],
+  ["gauge-face__dataset-qxuat","--s2"],["fluid-patch__welding-defects","--s3"],
+  ["fire-smoke__ak-rfpt5","--s4"],["crack-corrosion__codebrim","--s5"],
+  ["fluid-patch__kuanhan-fu","--s6"],["corrosion__meee-aegk9","--s7"],
+  ["gauge-face__yolo-lxxyl","--s8"],["fluid-patch__project-5v4jq","--s9"],
+];
+// class -> {source: boxes}
+const COMP = {
+  concrete_crack:{"crack-corrosion__codebrim":2937},
+  corrosion:{"crack-corrosion__codebrim":1549,"corrosion__meee-aegk9":693},
+  fluid_patch:{"fluid-patch__cv-6rgre":28814,"fluid-patch__welding-defects":8754,"fluid-patch__kuanhan-fu":934,"fluid-patch__project-5v4jq":345},
+  fire:{"fire-smoke__yolov5-u5mjv":9651,"fire-smoke__ak-rfpt5":6041},
+  smoke:{"fire-smoke__yolov5-u5mjv":12891,"fire-smoke__ak-rfpt5":5782},
+  gauge_face:{"gauge-face__dataset-qxuat":9262,"gauge-face__yolo-lxxyl":429},
+  efflorescence:{"crack-corrosion__codebrim":808},
+  exposed_rebar:{"crack-corrosion__codebrim":1500},
+  spalling:{"crack-corrosion__codebrim":1883},
+};
+const DROPS = [
+  ["gauge keypoints · qxuat (center/max/min/tip)",37067],
+  ["'Other' junk · ak-rfpt5",5069],
+  ["gauge keypoints · yolo-lxxyl (Center/Needle)",858],
+  ["'object' phantom · kuanhan-fu",1],
+];
+const col = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+const fmt = n => n.toLocaleString();
+
+const TILES = [
+  ["source images","55,984","10 datasets, pre-dedup"],
+  ["kept boxes","92,273","across 9 classes"],
+  ["classes","9","+ background negatives"],
+  ["sources","10","2 folders excluded"],
+  ["imbalance","48×","fluid_patch : efflorescence"],
+  ["dropped boxes","42,995","junk / wrong-target"],
+];
+document.getElementById("tiles").innerHTML = TILES.map(t=>
+  `<div class="tile"><div class="k">${t[0]}</div><div class="v">${t[1]}</div><div class="sub">${t[2]}</div></div>`).join("");
+
+// composition stacked bars
+const classTotals = Object.fromEntries(Object.entries(COMP).map(([c,m])=>[c,Object.values(m).reduce((a,b)=>a+b,0)]));
+const maxClass = Math.max(...Object.values(classTotals));
+const order = Object.keys(COMP).sort((a,b)=>classTotals[b]-classTotals[a]);
+document.getElementById("composition").innerHTML = order.map(c=>{
+  const segs = SOURCES.filter(([s])=>COMP[c][s]).map(([s,v])=>
+    `<div class="seg" data-w="${(COMP[c][s]/maxClass*100)}" style="width:0;background:${col(v)}" title="${s}: ${fmt(COMP[c][s])}"></div>`).join("");
+  return `<div class="row"><div class="lab">${c}</div><div class="bar">${segs}</div><div class="val">${fmt(classTotals[c])}</div></div>`;
+}).join("");
+document.getElementById("legend").innerHTML = SOURCES.map(([s,v])=>
+  `<span><i style="background:${col(v)}"></i>${s}</span>`).join("");
+
+// drops bars (single color)
+const maxDrop = Math.max(...DROPS.map(d=>d[1]));
+document.getElementById("drops").innerHTML = DROPS.map(([lab,v])=>
+  `<div class="row"><div class="lab" style="font-size:11.5px">${lab}</div>`+
+  `<div class="bar"><div class="seg" data-w="${v/maxDrop*100}" style="width:0;background:${col('--drop')}"></div></div>`+
+  `<div class="val">${fmt(v)}</div></div>`).join("");
+
+// animate widths after paint
+requestAnimationFrame(()=>requestAnimationFrame(()=>{
+  document.querySelectorAll(".seg").forEach(s=>{s.style.width=s.dataset.w+"%";});
+}));
+</script>

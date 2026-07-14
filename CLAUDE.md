@@ -2,6 +2,33 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Hard rules (non-negotiable)
+
+1. **Verify against official sources; attach evidence.** Do not present a claim, diagnosis, or
+   instruction as fact from memory. Confirm it against a credible, official source (official docs,
+   the project's own repo/issues, the vendor, a reproducible command on this machine) and **cite the
+   evidence** — a URL, a command + its output, a file + line. This applies to root-cause claims and
+   error diagnoses too: show the proof (e.g. the exact error, the registry value, the signature check),
+   not an assertion. If you cannot verify it, do **not** state it as fact and do **not** dress it up as
+   a "hypothesis" to make it sound legitimate — an unverified claim asserted as if true is a
+   hallucination. Say plainly "I have not verified this / I don't know," then either go verify it before
+   proceeding or stop and ask. Never let an unverified guess drive a decision or an instruction.
+
+2. **Surface blockers and prerequisites UP FRONT — before implementing.** Before starting a plan,
+   identify everything that must be true for the WHOLE plan to run end-to-end (env state, installs,
+   permissions, security policies, restarts, credentials). If any prerequisite needs the user to do
+   something, **ask them to run it first and confirm** — do not start implementing and then stop
+   halfway to ask. Never bury a required user action mid-execution. Transparency over confidence:
+   state what could break the plan and why, plainly, at the start.
+
+3. **Never abandon a plan or task list midway.** Once there is an active plan/task list, keep executing
+   every item through to completion — do not stop to "report progress," hand back, or wait around. The
+   **only** acceptable reason to halt before all tasks are done is to **ask the user a genuine blocking
+   question**: a specific, answerable question whose answer you actually need to proceed correctly (and
+   whose consequences — e.g. hours of compute, an irreversible delete — justify pausing). "I'm not sure
+   what to do next," reporting status, or laziness are NOT blockers. If you can keep going, keep going;
+   if you are truly blocked, ask one precise question and resume the moment it is answered.
+
 ## Repository overview
 
 This is **not a single application** — it's a collection of loosely related, independently-runnable
