@@ -151,22 +151,16 @@ _SAM3_CACHE: Dict[str, object] = {}
 _SAM2_CACHE: Dict[tuple, object] = {}
 
 
-DEFAULT_SAM3_CONFIDENCE_THRESHOLD = 0.7  # Sam3Processor's own default is 0.5 - raised after real
-    # evidence this session: at 0.5, an image with NO real matching object (a manhole/pipe fitting,
-    # no bolts) produced candidate "masks" that were perfect axis-aligned rectangles, IDENTICAL
-    # across multiple unrelated text concepts (bolt/screw/nut/fastener/rivet all returned the exact
-    # same two rectangles) - real SAM3 masks on genuine detections are irregular/contour-following,
-    # never a clean box, so this pattern is a real signal of degenerate low-confidence detections
-    # leaking through, not a resize/overlay bug on our end (confirmed by checking the raw polygon
-    # coordinates in cache/, before any drawing code touches them).
-
-
-def _load_sam3_processor(checkpoint_path: Optional[str] = None,
-                          confidence_threshold: float = DEFAULT_SAM3_CONFIDENCE_THRESHOLD):
+def _load_sam3_processor(checkpoint_path: Optional[str] = None, confidence_threshold: float = 0.5):
     """Lazy singleton (one per checkpoint_path+confidence_threshold combination): the official
-    SAM3 model + Sam3Processor, loaded once per process. Used by both
-    03_propose_regions_concept.py (text-prompted concept search) and 05_tighten_boxes.py
-    (box-prompted tightening) - same processor, two different prompt types on it.
+    SAM3 model + Sam3Processor, loaded once per process. Used by 05_tighten_boxes.py's tighten_box
+    (box-prompted tightening) - always called with its own explicit threshold
+    (DEFAULT_SAM3_TIGHTEN_CONFIDENCE_THRESHOLD), so 0.5 here is just Sam3Processor's own real
+    default, never actually relied on. (03_propose_regions_concept.py builds its own
+    Sam3Processor directly now instead of going through this cache - see that script's docstring
+    for why: the earlier version routed images through _load_rgb's numpy array into set_image(),
+    which silently misreads an HWC array's channel count as its width - real bug, fixed by passing
+    a PIL Image straight through instead.)
 
     checkpoint_path=None (default): build_sam3_image_model() auto-downloads the gated sam3
     checkpoint via huggingface_hub - requires `hf auth login` with access already granted on the
@@ -180,8 +174,8 @@ def _load_sam3_processor(checkpoint_path: Optional[str] = None,
     huggingface_hub has a cached token; those are two independent things.
 
     confidence_threshold: passed straight to Sam3Processor's own constructor argument of the same
-    name - see DEFAULT_SAM3_CONFIDENCE_THRESHOLD above for why the default here is raised above
-    Sam3Processor's own 0.5."""
+    name - tighten_box always passes DEFAULT_SAM3_TIGHTEN_CONFIDENCE_THRESHOLD explicitly, so this
+    function's own default is never actually relied on."""
     key = (checkpoint_path, confidence_threshold)
     if key not in _SAM3_CACHE:
         try:
@@ -272,16 +266,19 @@ def _clear_cuda_cache() -> None:
 
 
 def _load_rgb(image_path: Path) -> Optional[np.ndarray]:
-    """Both official SAM packages expect RGB (PIL-convention) images - cv2.imread's default BGR
-    order would silently feed the model wrong-colored input, not fail outright, so the BGR->RGB
-    conversion below must not be skipped. Uses cv2 (not PIL) for consistency with every other
-    image-loading call in this file - same resulting array either way, one less library. Returns
-    an HWC uint8 RGB array, or None if the file can't be opened."""
-    img_bgr = cv2.imread(str(image_path))
-    if img_bgr is None:
-        log.warning("  Could not open %s as an image", image_path.name)
+    """Loads via PIL, matching the official SAM3/SAM2 README examples exactly (both packages'
+    own basic-usage code loads with PIL.Image.open(...).convert("RGB")) - reverted from a cv2-based
+    version this session per explicit instruction to match the official path, even though a direct
+    byte-for-byte comparison confirmed this session that cv2.imread+cvtColor(BGR2RGB) produces an
+    identical array to PIL for a real test image (so this wasn't fixing a real bug - it's about
+    matching the documented/expected loading path exactly, not correctness). Returns an HWC uint8
+    RGB array, or None if the file can't be opened."""
+    try:
+        from PIL import Image
+        return np.array(Image.open(image_path).convert("RGB"))
+    except Exception as e:  # noqa: BLE001 - a bad image file must not abort the whole run
+        log.warning("  Could not open %s as an image: %r", image_path.name, e)
         return None
-    return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 
 def _resize_mask_to_shape(mask: np.ndarray, target_shape: tuple) -> np.ndarray:
@@ -322,28 +319,6 @@ def _mask_to_box_2d(mask: np.ndarray, target_shape: tuple) -> Optional[List[int]
         round(min(h, ymax + 1) / h * 1000),
         round(min(w, xmax + 1) / w * 1000),
     ]
-
-
-def _is_degenerate_rectangle(mask: np.ndarray, target_shape: tuple) -> bool:
-    """Real, evidence-based filter: on an image with no real matching object, SAM3's
-    text-prompted concept search was observed this session to return perfectly axis-aligned,
-    solid-filled rectangular "masks" with high confidence (0.7+, so confidence_threshold alone
-    doesn't filter them) - and the SAME rectangle repeating across multiple unrelated text
-    concepts, on an image later confirmed to have no bolts in it at all. A genuine segmented
-    fastener (round head, hex head, irregular shadow/highlight boundary) essentially never fills
-    its own bounding rectangle almost perfectly - real masks have extent (mask area / bounding-box
-    area) well below 1.0. Rejects any mask whose extent exceeds 0.97, i.e. a solid-filled
-    rectangle in all but name. This is a deliberately narrow, purely geometric check - it does not
-    touch confidence scores at all, so it's safe to combine with any confidence_threshold value."""
-    arr = _resize_mask_to_shape(mask, target_shape)
-    ys, xs = np.where(arr)
-    if ys.size == 0:
-        return False
-    box_area = (ys.max() - ys.min() + 1) * (xs.max() - xs.min() + 1)
-    if box_area <= 0:
-        return False
-    extent = float(arr.sum()) / box_area
-    return extent > 0.97
 
 
 def _mask_to_polygon(mask: np.ndarray, target_shape: tuple) -> Optional[List[List[int]]]:
@@ -389,88 +364,16 @@ def _mask_to_polygon(mask: np.ndarray, target_shape: tuple) -> Optional[List[Lis
     return [[round(x / w * 1000), round(y / h * 1000)] for x, y in points]
 
 
-def propose_regions_concept(
-    image_path: Path, concepts: List[str], sam3_checkpoint: Optional[str] = None,
-    confidence_threshold: float = DEFAULT_SAM3_CONFIDENCE_THRESHOLD,
-) -> "tuple[List[List[List[int]]], List[np.ndarray]]":
-    """Runs SAM3's official text-prompted concept segmentation (Sam3Processor) to find every
-    instance of `concepts` (e.g. "bolt", "fastener") anywhere in the image - genuinely semantic,
-    not blind segment-everything (that's the separate SAM2-based dumb pass). Returns
-    (polygons, masks) - polygons for the Gemini hint text (see _mask_to_polygon), masks (the real,
-    unsimplified boolean arrays) for QC drawing via draw_mask_overlay. Both capped at
-    MAX_REGION_HINTS (no area-fraction filter here - the concept match IS the filter). Never
-    raises: a failure here just means no concept hints for this image.
-
-    Calls set_image() ONCE per image (the expensive encoder pass), then for each concept calls
-    reset_all_prompts() (cheap - just clears prompt-specific state, keeps the cached image
-    features) + set_text_prompt() (reruns only the lighter text-grounding decoder) - confirmed via
-    source read of sam3/model/sam3_image_processor.py that this is the intended efficient reuse
-    pattern (set_text_prompt itself only accepts a single string, not a list - looping per-concept
-    is required, not a choice).
-
-    Deduplicates identical polygons across concepts before returning - real evidence this session
-    (see DEFAULT_SAM3_CONFIDENCE_THRESHOLD's comment) that on an image with no real matching
-    object, multiple unrelated concepts can independently produce the exact same degenerate
-    rectangular "mask", presumably some kind of default/fallback query output rather than a real
-    per-concept detection. Raising confidence_threshold is the primary fix; this dedup is a cheap,
-    defensive second layer that costs nothing and catches whatever a threshold change misses."""
-    img = _load_rgb(image_path)
-    if img is None:
-        return [], []
-    target_shape = img.shape[:2]
-    polygons: List[List[List[int]]] = []
-    masks: List[np.ndarray] = []
-    seen_polygons: set = set()
-    try:
-        processor = _load_sam3_processor(sam3_checkpoint, confidence_threshold)
-        with _sam3_autocast():
-            try:
-                state = processor.set_image(img)
-            except Exception as e:  # noqa: BLE001 - a segmentation failure must not abort the run
-                log.warning("  SAM3 set_image failed on %s: %r - proceeding without "
-                            "concept-targeted hints for this image", image_path.name, e)
-                return [], []
-            for concept in concepts:
-                try:
-                    processor.reset_all_prompts(state)
-                    state = processor.set_text_prompt(prompt=concept, state=state)
-                    # state["masks"] is (N, 1, H, W) - _forward_grounding's interpolate() call adds
-                    # a channel dim (unsqueeze(1), required by interpolate's NCHW expectation) that
-                    # never gets squeezed back out - confirmed via a real crash this session
-                    # (_mask_to_polygon expects plain (H, W) per mask). Squeeze axis 1 here, once,
-                    # rather than patching every downstream consumer.
-                    concept_masks = state["masks"].cpu().numpy().squeeze(1)  # (N,H,W) bool
-                except Exception as e:  # noqa: BLE001
-                    log.warning("  SAM3 concept segmentation failed on %s (concept=%r): %r - "
-                                "skipping this concept for this image", image_path.name, concept, e)
-                    continue
-                for mask_arr in concept_masks:
-                    if _is_degenerate_rectangle(mask_arr, target_shape):
-                        continue
-                    polygon = _mask_to_polygon(mask_arr, target_shape)
-                    if polygon is None:
-                        continue
-                    poly_key = tuple(tuple(pt) for pt in polygon)
-                    if poly_key in seen_polygons:
-                        continue
-                    seen_polygons.add(poly_key)
-                    polygons.append(polygon)
-                    masks.append(mask_arr)
-        return polygons[:MAX_REGION_HINTS], masks[:MAX_REGION_HINTS]
-    finally:
-        _clear_cuda_cache()
-
-
 def propose_regions_dumb(
     image_path: Path, model_id: str, points_per_side: int
 ) -> "tuple[List[List[List[int]]], List[np.ndarray]]":
     """Runs SAM2's official promptless/automatic "segment everything" mode
     (SAM2AutomaticMaskGenerator) - blind, no text prompt, no concept understanding at all. Filters
     candidates by plausible size (MIN/MAX_REGION_AREA_FRAC - the only filter available here, since
-    there's no semantic signal like propose_regions_concept has) and caps the count
-    (MAX_REGION_HINTS, keeping the largest). Returns (polygons, masks) - see
-    propose_regions_concept's docstring for why both. Never raises - same fail-safe reasoning as
-    propose_regions_concept.
+    there's no semantic signal like the concept-search pass has) and caps the count
+    (MAX_REGION_HINTS, keeping the largest). Returns (polygons, masks) - polygons for the Gemini
+    hint text, masks (the real, unsimplified boolean arrays) for QC drawing via
+    draw_mask_overlay. Never raises: a failure here just means no geometric hints for this image.
 
     Speed is UNVERIFIED on real hardware as of this writing - points_per_side is a genuine,
     directly-reachable tuning knob here (unlike the ultralytics/SAM3 dead end hit earlier this
@@ -519,12 +422,10 @@ def propose_regions_dumb(
         _clear_cuda_cache()
 
 
-# Deliberately much lower than DEFAULT_SAM3_CONFIDENCE_THRESHOLD (0.7, used for concept SEARCH,
-# where a high bar is needed to reject false-positive "found something" claims on images with no
-# real match). Tightening is a different situation: Gemini already found a real box, we're just
-# asking SAM3 to refine it, not asking "did you find anything at all" - filtering that refinement
-# by a strict confidence score would just make tightening silently no-op more often, falling back
-# to Gemini's original (looser) box more than necessary.
+# Deliberately low: Gemini already found a real box, we're just asking SAM3 to refine it, not
+# asking "did you find anything at all" - filtering that refinement by a strict confidence score
+# would just make tightening silently no-op more often, falling back to Gemini's original
+# (looser) box more than necessary.
 DEFAULT_SAM3_TIGHTEN_CONFIDENCE_THRESHOLD = 0.1
 
 
@@ -543,22 +444,32 @@ def tighten_box(
     (confirmed via source read of sam3/model/sam3_image_processor.py - NOT pixel xyxy like the
     ultralytics convention used earlier this session) - converted from this file's
     box_2d=[ymin,xmin,ymax,xmax]/1000 convention using the same cx/cy/w/h math already used by
-    write_yolo_label."""
+    write_yolo_label.
+
+    Loads the image via PIL directly (not _load_rgb's numpy array) and passes the PIL Image
+    straight to set_image(). Real, confirmed bug found this session: Sam3Processor.set_image()'s
+    numpy/tensor branch reads `height, width = image.shape[-2:]`, which assumes CHW - on an HWC
+    array (what _load_rgb / np.array(PIL Image) produces) that reads the channel count (3) as the
+    width, corrupting state["original_width"] and every mask/box scale factor derived from it for
+    the rest of this call. The isinstance(image, PIL.Image.Image) branch reads image.size
+    correctly instead."""
     try:
+        from PIL import Image
+
         processor = _load_sam3_processor(sam3_checkpoint, confidence_threshold)
-        img = _load_rgb(image_path)
-        if img is None:
-            return box_2d
-        target_shape = img.shape[:2]
+        image = Image.open(image_path).convert("RGB")
+        target_shape = (image.height, image.width)
         ymin, xmin, ymax, xmax = box_2d
         cx, cy = (xmin + xmax) / 2000.0, (ymin + ymax) / 2000.0
         w, h = (xmax - xmin) / 1000.0, (ymax - ymin) / 1000.0
 
         with _sam3_autocast():
-            state = processor.set_image(img)
+            state = processor.set_image(image)
             processor.reset_all_prompts(state)
             state = processor.add_geometric_prompt(box=[cx, cy, w, h], label=True, state=state)
-            # state["masks"] is (N, 1, H, W) - see propose_regions_concept's comment for why.
+            # state["masks"] is (N, 1, H, W) - _forward_grounding's interpolate() call adds a
+            # channel dim (unsqueeze(1), required by interpolate's NCHW expectation) that never
+            # gets squeezed back out - confirmed via a real crash this session.
             masks = state["masks"].cpu().numpy().squeeze(1)
             # state["scores"] can come out as bfloat16 under the autocast context above (sigmoid/
             # multiply ops inherit it) - numpy has no bfloat16 dtype at all, so .numpy() on it

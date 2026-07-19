@@ -1,46 +1,39 @@
 """Stage 2 of 4: SAM3 concept-targeted region-proposal pass. Local and free (no Gemini quota
 spent) - searches every image for fastener-like concepts (bolt, screw, nut, fastener, rivet by
 default) and writes candidate regions to cache/sam_regions_concept/<stem>.json + a QC visualization
-(real mask overlay, not a simplified outline) to qc/sam_proposals_concept/<stem>.<ext>. Downstream
-stages (04_annotate_with_gemini.py, 05_tighten_boxes.py) read this stage's cache/ output - nothing
-here calls Gemini or loads the box-tightening machinery beyond what SAM3 itself provides, so this
-can be run, re-run, and tuned (e.g. --concepts) independently.
+(real mask overlay, not a simplified outline) to qc/sam_proposals_concept/<stem>.<ext>.
 
-Uses the OFFICIAL facebookresearch/sam3 package (Sam3Processor), not ultralytics - switched this
-session after real problems with the ultralytics path (a cascading CUDA OOM on a 100-image run,
-never fully explained; repeated friction with ultralytics' own argument whitelist). See
-annotate_common.py's module docstring for the full writeup.
+Deliberately as simple as sam3_minimal.py's proven-working call pattern: build the model once,
+loop over images, set_image/set_text_prompt per image/concept. One thing this fixes vs. an earlier
+version of this script that routed images through annotate_common._load_rgb() first: that function
+returns a numpy HWC array, and Sam3Processor.set_image()'s numpy/tensor branch reads
+`height, width = image.shape[-2:]` - a CHW assumption. On an HWC array that reads the channel count
+(3) as the width, corrupting every returned mask's scale factor and silently destroying real
+detections (confirmed: that path returned 0 candidates on images with confirmed real bolts, while
+this script's PIL-direct call finds them correctly - same image, same threshold, same checkpoint).
+Passing a PIL Image straight to set_image(), like the official README does, hits the correct
+isinstance(image, PIL.Image.Image) branch instead.
 
-Setup
------
-Run in the WSL yolo_det_py312 conda env - needs the official `sam3` package installed
-(git clone https://github.com/facebookresearch/sam3 && cd sam3 && pip install -e .), Python >= 3.12,
-torch >= 2.10. SAM3 (facebook/sam3 on Hugging Face) IS gated: request access, then `hf auth login`
-- build_sam3_image_model() auto-downloads from there once access is granted, no manual checkpoint
-placement needed.
-
-Usage
------
-    python 03_propose_regions_concept.py --limit 5      # smoke test a handful first
-    python 03_propose_regions_concept.py                # full pass over everything in npu_bolt/
-    python 03_propose_regions_concept.py --concepts "bolt,screw,nut,fastener,rivet,washer" --force
-                                                          # broaden concepts and recompute everything
-
-Then inspect qc/sam_proposals_concept/ before running 04_annotate_with_gemini.py - this is the
-"dry run" from an earlier single-script design; there's no separate --dry-run flag needed any more,
-since running this stage alone already stops before any Gemini call exists to make.
+Confidence threshold default is 0.3, not Sam3Processor's own 0.5: real evidence this session (raw,
+unfiltered scores on npu_bolt/AAAA.jpg, visually confirmed via mask overlay to all be genuine bolt
+hardware) showed real detections scoring as low as 0.256, so a higher cutoff was silently dropping
+correct hits.
 """
 import argparse
 import json
 import logging
 from pathlib import Path
 
-from annotate_common import (
-    DEFAULT_CONCEPTS, DEFAULT_SAM3_CONFIDENCE_THRESHOLD, IMG_EXTS, SAM_CONCEPT_COLOR,
-    draw_mask_overlay, propose_regions_concept,
-)
+import torch
+from PIL import Image
+from sam3.model_builder import build_sam3_image_model
+from sam3.model.sam3_image_processor import Sam3Processor
+
+from annotate_common import DEFAULT_CONCEPTS, IMG_EXTS, MAX_REGION_HINTS, SAM_CONCEPT_COLOR, _mask_to_polygon, draw_mask_overlay
 
 log = logging.getLogger("propose_regions_concept")
+
+DEFAULT_CONFIDENCE_THRESHOLD = 0.3
 
 # If sam3.pt already sits next to this script (the common case - manually downloaded once, no
 # reason to re-download or need hf auth login every run), default straight to it. Only falls back
@@ -62,21 +55,17 @@ def main() -> None:
                               f"local file is found, build_sam3_image_model() auto-downloads via "
                               f"huggingface_hub, which requires `hf auth login` with access already "
                               f"granted to the gated facebook/sam3 repo.")
-    parser.add_argument("--confidence-threshold", type=float, default=DEFAULT_SAM3_CONFIDENCE_THRESHOLD,
-                         help=f"SAM3's own confidence filter for a concept match (default "
-                              f"{DEFAULT_SAM3_CONFIDENCE_THRESHOLD}, raised above Sam3Processor's "
-                              f"own 0.5 default - real evidence this session that 0.5 let degenerate, "
-                              f"perfectly-rectangular 'detections' through on images with no real "
-                              f"matching object, identical across unrelated concepts). Raise further "
-                              f"if junk candidates still show up in qc/sam_proposals_concept/; lower "
-                              f"if real fasteners are being missed.")
+    parser.add_argument("--confidence-threshold", type=float, default=DEFAULT_CONFIDENCE_THRESHOLD,
+                         help=f"Sam3Processor's own confidence filter for a concept match (default "
+                              f"{DEFAULT_CONFIDENCE_THRESHOLD}, tuned down from Sam3Processor's own "
+                              f"0.5 default - real evidence this session that 0.5+ silently dropped "
+                              f"genuine detections scoring as low as 0.256).")
     parser.add_argument("--limit", type=int, default=None,
                          help="Only consider the first N images from --src this run.")
     parser.add_argument("--force", action="store_true",
                          help="Recompute even for images whose cache already matches the current "
-                              "--concepts (by default those are skipped for free). Use this after "
-                              "changing --concepts and wanting a full redo, or if you suspect a "
-                              "cached result is bad.")
+                              "--concepts/--confidence-threshold (by default those are skipped for "
+                              "free).")
     args = parser.parse_args()
 
     src = args.src.resolve()
@@ -99,7 +88,12 @@ def main() -> None:
     if args.limit:
         images = images[: args.limit]
     total = len(images)
-    log.info("Images found: %d", total)
+    log.info("Images found: %d. Concepts: %s. Confidence threshold: %s", total, concepts_list,
+              args.confidence_threshold)
+
+    # Load once, loop over images - matches the official README's own usage pattern.
+    model = build_sam3_image_model(checkpoint_path=args.sam3_checkpoint)
+    processor = Sam3Processor(model, confidence_threshold=args.confidence_threshold)
 
     proposed, skipped = 0, 0
     for i, img_path in enumerate(images, start=1):
@@ -115,9 +109,32 @@ def main() -> None:
             log.info("[%d/%d] %s - RE-PROPOSE: cached concepts/confidence-threshold differ from "
                       "current run", i, total, img_path.name)
 
-        polygons, masks = propose_regions_concept(
-            img_path, concepts_list, args.sam3_checkpoint, args.confidence_threshold
-        )
+        image = Image.open(img_path).convert("RGB")
+        target_shape = (image.height, image.width)
+
+        polygons: list = []
+        masks: list = []
+        seen_polygons: set = set()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            state = processor.set_image(image)
+            for concept in concepts_list:
+                processor.reset_all_prompts(state)
+                output = processor.set_text_prompt(state=state, prompt=concept)
+                concept_masks = output["masks"].cpu().numpy().squeeze(1)  # (N,H,W) bool
+                for mask_arr in concept_masks:
+                    polygon = _mask_to_polygon(mask_arr, target_shape)
+                    if polygon is None:
+                        continue
+                    poly_key = tuple(tuple(pt) for pt in polygon)
+                    if poly_key in seen_polygons:
+                        continue
+                    seen_polygons.add(poly_key)
+                    polygons.append(polygon)
+                    masks.append(mask_arr)
+
+        polygons = polygons[:MAX_REGION_HINTS]
+        masks = masks[:MAX_REGION_HINTS]
+
         cache_path.write_text(
             json.dumps({"concepts": concepts_list, "confidence_threshold": args.confidence_threshold,
                         "polygons": polygons}, indent=2),
