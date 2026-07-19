@@ -53,7 +53,7 @@ from pathlib import Path
 
 from annotate_common import (
     BoltAnnotation, BoltBox, IMG_EXTS, draw_tightening_debug, draw_visualization,
-    filter_valid_boxes, migrate_boxes, tighten_box, write_data_yaml, write_yolo_label,
+    filter_valid_boxes, migrate_boxes, tighten_boxes_for_image, write_data_yaml, write_yolo_label,
 )
 
 log = logging.getLogger("tighten_boxes")
@@ -112,6 +112,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(out / "run_log.txt", encoding="utf-8"), logging.StreamHandler()],
+        force=True,  # a package imported before this point (sam3/torch/etc.) may already have
+                     # attached its own root-logger handler, which makes a plain basicConfig() a
+                     # silent no-op - force=True always (re)configures regardless (see
+                     # 03_propose_regions_concept.py for the real crash that surfaced this).
     )
     log.info("Run started. Source: %s", src)
     if args.clean:
@@ -139,14 +143,17 @@ def main() -> None:
         result = filter_valid_boxes(result, img_path.name)
 
         if not args.skip_tightening:
-            tightened_boxes = []
-            debug_records = []
-            for box in result.boxes:
-                tight_box_2d = tighten_box(img_path, box.box_2d, args.sam3_checkpoint)
-                tightened_boxes.append(BoltBox(box_2d=tight_box_2d, label=box.label))
-                debug_records.append(
-                    {"label": box.label, "before": box.box_2d, "after": tight_box_2d}
-                )
+            tight_boxes_2d = tighten_boxes_for_image(
+                img_path, [box.box_2d for box in result.boxes], args.sam3_checkpoint
+            )
+            tightened_boxes = [
+                BoltBox(box_2d=tight_box_2d, label=box.label)
+                for box, tight_box_2d in zip(result.boxes, tight_boxes_2d)
+            ]
+            debug_records = [
+                {"label": box.label, "before": box.box_2d, "after": tight_box_2d}
+                for box, tight_box_2d in zip(result.boxes, tight_boxes_2d)
+            ]
             result = BoltAnnotation(boxes=tightened_boxes)
             (sam_debug_dir / f"{img_path.stem}.json").write_text(
                 json.dumps(debug_records, indent=2), encoding="utf-8"

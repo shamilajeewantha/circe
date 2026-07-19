@@ -41,6 +41,11 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(src.parent / "cleanup_cad_log.txt", encoding="utf-8"), logging.StreamHandler()],
+        force=True,  # defensive consistency with the other numbered scripts - see
+                     # 03_propose_regions_concept.py for the real bug (a package attaching its own
+                     # root-logger handler before this point silently makes basicConfig() a no-op)
+                     # that motivated adding this everywhere, even though this script doesn't
+                     # import torch/sam and is lower-risk.
     )
 
     if not src.is_dir():

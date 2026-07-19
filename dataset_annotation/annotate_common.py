@@ -68,8 +68,11 @@ DUMB_MAX_DIM = 1024  # SAM2's automatic mode does NOT downscale internally (unli
 MIN_REGION_AREA_FRAC = 0.0005  # drop SAM2 masks smaller than this fraction of image area -
                                 # noise/speckle (the only filter available for the dumb pass - no
                                 # semantic signal like the concept pass has)
-MAX_REGION_AREA_FRAC = 0.15    # drop masks larger than this fraction of image area - background/
-                                # large structural regions, not a single small fastener
+MAX_REGION_AREA_FRAC = 0.05    # drop masks larger than this fraction of image area - background/
+                                # large structural regions, not a single small fastener. Lowered
+                                # from 0.15 after real visual QC evidence this session: masks that
+                                # size were consistently sky/pole/decking/cable-wrap background,
+                                # never real hardware, on the inspected images.
 MAX_REGION_HINTS = 30           # cap candidates sent as text per image, keeps the hint compact and
                                  # avoids drowning the model in low-value candidates
 MAX_POLYGON_POINTS = 12         # cap per-candidate polygon vertex count via progressive
@@ -100,8 +103,28 @@ class BoltBox(BaseModel):
     label: Label
 
 
+class ConceptCandidateDisposition(BaseModel):
+    """Accountability record for ONE concept-targeted (SAM3) candidate region: real user feedback
+    this session was that Gemini appeared to silently ignore correct SAM3 hints on at least one
+    image, with no way to tell whether a given candidate was considered-and-rejected or never
+    looked at. Every concept-targeted candidate given for an image must get exactly one of these,
+    in index order - no silent drops."""
+    index: int = Field(description="0-based index of this candidate in the numbered "
+                                    "'Concept-targeted candidate regions' list as given for this image")
+    accepted: bool = Field(description="True if this candidate was turned into one of this "
+                                        "image's output boxes")
+    reason: str = Field(description="If accepted: which output box it became (e.g. 'box 0'). If "
+                                     "not accepted: a specific, concrete reason - not a generic "
+                                     "phrase like 'not a fastener'. E.g. 'background/shadow, no "
+                                     "hardware visible here', 'cable clamp body, excluded by rule, "
+                                     "not a structural bolt', 'duplicate of candidate 2 - same "
+                                     "fastener already boxed', 'too blurred/occluded to classify "
+                                     "confidently'.")
+
+
 class BoltAnnotation(BaseModel):
     boxes: List[BoltBox]
+    concept_candidate_dispositions: List[ConceptCandidateDisposition] = Field(default_factory=list)
 
 
 class ImageBoxes(BaseModel):
@@ -110,6 +133,11 @@ class ImageBoxes(BaseModel):
     that's safe to rely on)."""
     file: str = Field(description="Exact filename as given in that image's 'Image: <filename>' label")
     boxes: List[BoltBox]
+    concept_candidate_dispositions: List[ConceptCandidateDisposition] = Field(
+        description="EXACTLY one entry per concept-targeted candidate region given for this image, "
+                    "in index order (0, 1, 2, ...) - omit nothing, even if this image had zero "
+                    "concept-targeted candidates (then this is just an empty list)."
+    )
 
 
 class BatchAnnotation(BaseModel):
@@ -415,7 +443,15 @@ def propose_regions_dumb(
             if polygon is not None:
                 scored.append((area_frac, polygon, mask_arr))
 
-        scored.sort(key=lambda t: t[0], reverse=True)
+        # Ascending, NOT descending: real evidence this session (visual QC inspection of
+        # qc/sam_proposals_dumb/*.jpg) showed the largest surviving masks are almost always
+        # background/structure (sky patches, whole poles, wood-plank decking, long cable-wrap
+        # segments), not individual fasteners - on one image, 10 of 19 candidate slots were large
+        # low-value blobs while the genuinely useful bolt-head masks were the smallest, at the end
+        # of a descending sort. Small, compact regions are far more likely to be individual
+        # hardware for this dataset's subject matter, so prefer keeping those when trimming to
+        # MAX_REGION_HINTS.
+        scored.sort(key=lambda t: t[0])
         top = scored[:MAX_REGION_HINTS]
         return [p for _, p, _ in top], [m for _, _, m in top]
     finally:
@@ -429,16 +465,27 @@ def propose_regions_dumb(
 DEFAULT_SAM3_TIGHTEN_CONFIDENCE_THRESHOLD = 0.1
 
 
-def tighten_box(
-    image_path: Path, box_2d: List[int], sam3_checkpoint: Optional[str] = None,
+def tighten_boxes_for_image(
+    image_path: Path, boxes_2d: List[List[int]], sam3_checkpoint: Optional[str] = None,
     confidence_threshold: float = DEFAULT_SAM3_TIGHTEN_CONFIDENCE_THRESHOLD,
-) -> List[int]:
-    """Runs SAM3's official box-prompted mode (Sam3Processor.add_geometric_prompt) with box_2d as
-    a box prompt (the actual Grounded-SAM use case: use a rough detection to prompt a segmentation
-    model for a pixel-precise boundary) and returns the tightened box. Falls back to the original
-    box_2d - never a worse or crashing result - if SAM3 produces an empty/degenerate mask for that
-    prompt, or if inference fails outright; a tightening failure must never discard a valid
-    detection.
+) -> List[List[int]]:
+    """Runs SAM3's official box-prompted mode (Sam3Processor.add_geometric_prompt) once per box in
+    boxes_2d, but encodes the image via set_image() only ONCE for all of them - real, confirmed bug
+    fixed this session: an earlier per-box tighten_box() called set_image() (a full backbone
+    forward pass, real GPU memory each time) separately for EVERY box, even when many boxes
+    belonged to the same image (confirmed: 16 redundant encodes of the same image on a real run).
+    Under a heavier annotation batch (more boxes/image) this caused a real, reproducible cascading
+    CUDA OOM starting partway through a run, after which even torch.cuda.empty_cache() itself
+    failed identically (the same poisoned-context signature established earlier this session) -
+    every subsequent image's tightening silently fell back to untightened boxes for the rest of
+    the run. Fix mirrors the already-correct reuse pattern in propose_regions_concept: one
+    set_image() per image, then cheap reset_all_prompts()+add_geometric_prompt() per box.
+
+    Returns one box_2d per input box_2d, same order - each individually falls back to its own
+    original box_2d (never a worse or crashing result) if SAM3 produces an empty/degenerate mask
+    for that specific prompt, or if that specific prompt call fails; a single box's tightening
+    failure must never discard a valid detection or affect any other box's result. If set_image()
+    itself fails (whole-image failure, not per-box), ALL boxes fall back to their originals.
 
     add_geometric_prompt's box format is [center_x, center_y, width, height] normalized to [0,1]
     (confirmed via source read of sam3/model/sam3_image_processor.py - NOT pixel xyxy like the
@@ -453,42 +500,61 @@ def tighten_box(
     width, corrupting state["original_width"] and every mask/box scale factor derived from it for
     the rest of this call. The isinstance(image, PIL.Image.Image) branch reads image.size
     correctly instead."""
-    try:
-        from PIL import Image
+    if not boxes_2d:
+        return []
+    from PIL import Image
 
+    results: List[List[int]] = list(boxes_2d)
+    try:
         processor = _load_sam3_processor(sam3_checkpoint, confidence_threshold)
         image = Image.open(image_path).convert("RGB")
         target_shape = (image.height, image.width)
-        ymin, xmin, ymax, xmax = box_2d
-        cx, cy = (xmin + xmax) / 2000.0, (ymin + ymax) / 2000.0
-        w, h = (xmax - xmin) / 1000.0, (ymax - ymin) / 1000.0
+        try:
+            with _sam3_autocast():
+                state = processor.set_image(image)
+        except Exception as e:  # noqa: BLE001 - a whole-image failure falls back ALL boxes
+            log.warning("  SAM3 set_image failed on %s: %r - keeping all %d original box(es)",
+                        image_path.name, e, len(boxes_2d))
+            return results
 
-        with _sam3_autocast():
-            state = processor.set_image(image)
-            processor.reset_all_prompts(state)
-            state = processor.add_geometric_prompt(box=[cx, cy, w, h], label=True, state=state)
-            # state["masks"] is (N, 1, H, W) - _forward_grounding's interpolate() call adds a
-            # channel dim (unsqueeze(1), required by interpolate's NCHW expectation) that never
-            # gets squeezed back out - confirmed via a real crash this session.
-            masks = state["masks"].cpu().numpy().squeeze(1)
-            # state["scores"] can come out as bfloat16 under the autocast context above (sigmoid/
-            # multiply ops inherit it) - numpy has no bfloat16 dtype at all, so .numpy() on it
-            # raises TypeError('Got unsupported ScalarType BFloat16') - confirmed via a real crash
-            # this session. .float() first is the standard fix (masks stays bool from the `> 0.5`
-            # comparison in _forward_grounding regardless of autocast, so it doesn't need this).
-            scores = state["scores"].float().cpu().numpy()
-        if len(masks) == 0:
-            return box_2d
-        best = int(np.argmax(scores))
-        tight = _mask_to_box_2d(masks[best], target_shape)
-        if tight is not None:
-            return tight
+        for i, box_2d in enumerate(boxes_2d):
+            try:
+                ymin, xmin, ymax, xmax = box_2d
+                cx, cy = (xmin + xmax) / 2000.0, (ymin + ymax) / 2000.0
+                w, h = (xmax - xmin) / 1000.0, (ymax - ymin) / 1000.0
+                with _sam3_autocast():
+                    processor.reset_all_prompts(state)
+                    box_state = processor.add_geometric_prompt(
+                        box=[cx, cy, w, h], label=True, state=state
+                    )
+                    # box_state["masks"] is (N, 1, H, W) - _forward_grounding's interpolate() call
+                    # adds a channel dim (unsqueeze(1), required by interpolate's NCHW expectation)
+                    # that never gets squeezed back out - confirmed via a real crash this session.
+                    masks = box_state["masks"].cpu().numpy().squeeze(1)
+                    # box_state["scores"] can come out as bfloat16 under the autocast context above
+                    # (sigmoid/multiply ops inherit it) - numpy has no bfloat16 dtype at all, so
+                    # .numpy() on it raises TypeError('Got unsupported ScalarType BFloat16') -
+                    # confirmed via a real crash this session. .float() first is the standard fix
+                    # (masks stays bool from the `> 0.5` comparison in _forward_grounding
+                    # regardless of autocast, so it doesn't need this).
+                    scores = box_state["scores"].float().cpu().numpy()
+                if len(masks) == 0:
+                    continue
+                best = int(np.argmax(scores))
+                tight = _mask_to_box_2d(masks[best], target_shape)
+                if tight is not None:
+                    results[i] = tight
+                del box_state, masks, scores
+            except Exception as e:  # noqa: BLE001 - one box's failure must not affect the others
+                log.warning("  SAM3 box-tightening failed on %s box=%r: %r - keeping the "
+                            "original box", image_path.name, box_2d, e)
+        del state
     except Exception as e:  # noqa: BLE001 - tightening must never crash or discard a detection
-        log.warning("  SAM3 box-tightening failed on %s box=%r: %r - keeping the original box",
-                    image_path.name, box_2d, e)
+        log.warning("  SAM3 box-tightening failed outright on %s: %r - keeping all original "
+                    "box(es)", image_path.name, e)
     finally:
         _clear_cuda_cache()
-    return box_2d
+    return results
 
 
 def _valid_box(box_2d: list) -> bool:

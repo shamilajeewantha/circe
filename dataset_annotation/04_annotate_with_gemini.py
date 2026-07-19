@@ -1,17 +1,19 @@
 """Stage 3 of 4: annotate bolt/nut images with Gemini into exactly 3 classes:
     bolt_ok, bolt_defective, bolt_corroded
 
-Reads region proposals from TWO independent local SAM passes and sends them as polygon text hints
-alongside each image:
-  - cache/sam_regions_concept/<stem>.json (written by 03_propose_regions_concept.py, SAM3
-    text-prompted) - semantic, may share Gemini's own language-grounding blind spots (both have to
-    understand what the WORD "bolt" visually means).
-  - cache/sam_regions_dumb/<stem>.json (written by 02_propose_regions_dumb.py, SAM2 promptless) -
-    zero notion of "bolt" at all, a genuinely different failure mode.
-Does NOT load any SAM model itself - if either upstream stage wasn't run for some/all pending
-images, those images are just sent with no hints from that source (a warning is logged), never
-blocked. This is the ONLY stage that spends real Gemini API quota - 02, 03, 05 are all local/free
-and can be re-run freely.
+Reads region proposals from cache/sam_regions_concept/<stem>.json (written by
+03_propose_regions_concept.py, SAM3 text-prompted) and sends them alongside each image both as a
+polygon text hint AND as a visual overlay image (qc/sam_proposals_concept/<stem>.<ext>, the same
+numbered mask overlay already drawn for QC). The SAM2 promptless/geometric pass
+(02_propose_regions_dumb.py) is no longer sent to Gemini at all as of this session - real
+experience this session was that SAM3's concept-targeted results were consistently strong once its
+own bugs were fixed, and the geometric pass added noise/cost without enough benefit to justify
+including it here (02_propose_regions_dumb.py itself is untouched and still useful standalone -
+just not fed into this stage anymore).
+Does NOT load any SAM model itself - if 03_propose_regions_concept.py wasn't run for some/all
+pending images, those images are just sent with no hints (a warning is logged), never blocked.
+This is the ONLY stage that spends real Gemini API quota - 02, 03, 05 are all local/free and can be
+re-run freely.
 
 bolt_defective merges "loose" and "damaged" - kept as separate classes originally, but they share
 the same underlying visual symptom (fastener doesn't sit flush) for different root causes, which
@@ -63,8 +65,7 @@ Setup
 
 Usage
 -----
-    python 02_propose_regions_dumb.py            # stage 1 (optional but recommended)
-    python 03_propose_regions_concept.py          # stage 2 (optional but recommended)
+    python 03_propose_regions_concept.py          # stage 2 (recommended - this stage's real input)
     python 04_annotate_with_gemini.py --limit 10  # smoke test first
     python 04_annotate_with_gemini.py             # full run over everything in npu_bolt/
 
@@ -159,7 +160,7 @@ DEFAULT_MODEL = "gemini-robotics-er-1.6-preview"
 # Bump this whenever CLASSES/SYSTEM_PROMPT changes meaningfully. Cached results record which
 # version produced them (alongside MODEL) so a taxonomy change is detected as staleness too, not
 # just a model change - see the --reannotate-stale gating in main().
-PROMPT_VERSION = 8  # v2: merged bolt_loose+bolt_damaged -> bolt_defective (3-class taxonomy)
+PROMPT_VERSION = 14  # v2: merged bolt_loose+bolt_damaged -> bolt_defective (3-class taxonomy)
                     # v3: explicit box-scope rule (head/cap + attached shank/thread only; never a
                     # bare shank with no head/nut in frame) - class names unchanged, only box
                     # geometry/consistency, so LABEL_MIGRATIONS has nothing to remap for this bump
@@ -182,6 +183,68 @@ PROMPT_VERSION = 8  # v2: merged bolt_loose+bolt_damaged -> bolt_defective (3-cl
                     # facebookresearch/sam2, genuinely no language-grounding bias unlike the earlier
                     # generic-via-SAM3 attempt) - SYSTEM_PROMPT's "Candidate regions" rule rewritten
                     # again to describe both sources with this corrected framing
+                    # v9: real miss found via visual QC on a 30-image gemini-3.1-flash-lite run -
+                    # AUT-0001.jpg (a hex nut + 2 Phillips screws in a shadowed, top-down-angle
+                    # channel) got 0 boxes even though the concept-targeted SAM3 pass correctly
+                    # found all of them (confirmed via qc/sam_proposals_concept/AUT-0001.jpg).
+                    # Clarified the "skip if not confident" rule: it's for "is this a fastener at
+                    # all" uncertainty, not "which of the 3 classes" uncertainty - the latter should
+                    # never suppress a detection. Geometry/labels unaffected, LABEL_MIGRATIONS still
+                    # applies unmodified.
+                    # v10: real regression found via visual QC re-inspecting the SAME image
+                    # (AUT-0000.jpg) after the v9 re-run: two separate bolts sharing one cable-clamp
+                    # bracket, previously two correctly-separated tight boxes, came back as a single
+                    # box spanning both - violating the existing "one box per fastener, never merge"
+                    # rule. No temperature was pinned, so this run-to-run difference wasn't cleanly
+                    # attributable to the v9 prompt edit vs. plain sampling noise; added
+                    # temperature=0 to GenerateContentConfig (structured-extraction task, standard
+                    # practice, makes future prompt changes actually testable) and strengthened the
+                    # "never merge" rule with an explicit same-bracket example either way, since it's
+                    # a real failure mode regardless of root cause. Geometry/labels unaffected.
+                    # v11: temperature=0 did NOT fix the v10 regression - re-running the SAME image
+                    # at temperature=0 gave the IDENTICAL merged result both times, proving this is a
+                    # reproducible model behavior on this hardware shape, not sampling noise. Added a
+                    # concrete, dataset-specific example to the "never merge" rule describing the
+                    # exact shape (a wire-rope/cable clamp with 1-2 threaded studs+nuts, common in
+                    # this dataset, that looks like "one part" at a glance) and stating explicitly
+                    # that a clamp with 2 visible nuts must produce 2 boxes. Geometry/labels
+                    # unaffected.
+                    # v12: explicit user request - suspected Gemini was silently ignoring correct
+                    # SAM3 concept-targeted hints (consistent with the earlier AUT-0001.jpg miss).
+                    # Added mandatory per-candidate accounting: response schema now requires a
+                    # concept_candidate_dispositions entry for EVERY numbered concept-targeted
+                    # candidate (accepted=true + which box, or accepted=false + a specific reason) -
+                    # no silent drops. Concept hint text is now numbered by index so the model can
+                    # reference candidates unambiguously. Gemini can still invent boxes with no
+                    # matching candidate (this only adds accounting, not a ceiling on detections).
+                    # Discarded reasons are logged per-image and persisted in cache/raw_gemini/.
+                    # Only applies to list 1 (concept-targeted/SAM3) per explicit instruction - list
+                    # 2 (geometric/SAM2) stays advisory-only, unchanged.
+                    # v13: real user concern - a comparison run on gemini-robotics-er-1.6-preview
+                    # under v12 produced severe hallucination (~13 phantom boxes on empty
+                    # background on one image, while missing the one obvious real bolt) - a much
+                    # bigger drop than ER's previously-reported "super great" quality before the
+                    # SAM hint text existed at all. Hypothesis: asking a model to mentally
+                    # re-project dozens of raw [[x,y],...] numbers back onto the photo is a much
+                    # harder channel than seeing them. Now also sends the ALREADY-COMPUTED numbered
+                    # mask overlay image (qc/sam_proposals_concept/<file>, drawn by
+                    # 03_propose_regions_concept.py) as an additional image right after the raw
+                    # photo and text candidate list, so the model can see candidates visually
+                    # instead of only reasoning from coordinate text. No new SAM computation - pure
+                    # reuse of an existing QC artifact. Geometry/labels unaffected; input format
+                    # changed (extra image per call when a concept-search QC overlay exists), so
+                    # cache is bumped stale like every prior hint-format change.
+                    # v14: two explicit user calls, both real simplifications: (1) the geometric/
+                    # SAM2 candidate list is REMOVED entirely, not just left advisory - real
+                    # experience this session was SAM3's concept-targeted results were consistently
+                    # strong once its own bugs were fixed, and the geometric pass added noise/cost
+                    # without enough benefit (02_propose_regions_dumb.py itself is untouched, just
+                    # no longer fed into this stage). (2) the raw polygon coordinate text for
+                    # concept-targeted candidates is now the FALLBACK, not sent alongside the
+                    # overlay image - when the overlay exists (the normal case), it alone is the
+                    # candidate list; sending both was redundant and plausibly made the model work
+                    # harder reconciling two representations of the same thing instead of just
+                    # looking at the image. Geometry/labels unaffected.
 
 SYSTEM_PROMPT = """You are labeling images of bolts, nuts, and other threaded fasteners for a
 robot inspection vision training set. For every individual fastener (bolt head, nut, or bolt+nut
@@ -212,7 +275,13 @@ Rules:
   since it's usually the more visually-certain call and the more safety-relevant one):
   bolt_corroded > bolt_defective > bolt_ok.
 - If you cannot see a fastener clearly enough to classify it confidently, skip it rather than
-  guessing.
+  guessing. This rule is about whether something IS a fastener at all - it is NOT a reason to skip
+  something you can already tell is a nut/bolt/screw head just because unusual lighting, a
+  shadowed recess, an odd viewing angle, or partial occlusion makes the ok/defective/corroded call
+  harder. If the shape is clearly fastener hardware, box it and make your best classification call
+  (defaulting toward bolt_corroded/bolt_defective over bolt_ok if genuinely torn between two of the
+  three, per the "do not default to bolt_ok when unsure" rule below) - do not let classification
+  uncertainty suppress a detection you're actually confident about.
 - If an image contains no fasteners at all, give it an empty boxes list - do not omit it.
 - Scan the image in a systematic grid, not just where fasteners are obvious: divide it into
   top-left, top-right, bottom-left, bottom-right, and center regions, and deliberately look for
@@ -232,38 +301,48 @@ Rules:
   assigning bolt_ok; partial or localized rust still counts as bolt_corroded.
 - One box per fastener, never merge: if several fasteners are clustered or in a row, output one
   separate tightly-cropped box per fastener - never a single large box spanning multiple fasteners
-  or a whole assembly/panel.
+  or a whole assembly/panel. This applies even when multiple fasteners sit on the SAME bracket,
+  clamp, or plate right next to each other (e.g. two bolts threaded into one cable-clamp body) -
+  each fastener still gets its own box tightly cropped to just that one head/nut, not a box that
+  spans both.
+  Concretely, a wire-rope/cable clamp (a cast metal saddle or U-bolt body with a wire rope passing
+  through it and one or two threaded studs+nuts holding it closed) is a VERY common shape in this
+  dataset - it looks like "one part" at a glance, but each individual nut/stud visible on it is
+  its own fastener and needs its own tightly-cropped box. A clamp with 2 visible nuts must produce
+  2 boxes, each cropped to just one nut - never 1 box covering the whole clamp body, and never 1
+  box spanning from one nut to the other.
 - Box tightness: every box's four edges must each touch the visible extent of that fastener (head/
   cap, plus any same-fastener shank/thread per the box scope rule above) on that side - no padding,
   margin, or slack on any edge. A box that is visibly looser than the fastener it's drawn around,
   or that clips off part of the fastener, is wrong even if the label is correct.
-- Candidate regions: some images come with up to TWO separate lists of candidate regions, from two
-  independent automated segmentation passes that ran before you saw the image, using two different
-  models with two genuinely different failure modes. NEITHER list is authoritative - both are hints
-  only, to help you notice things, not a checklist to trust or reproduce blindly. You must still
-  verify every candidate independently against every rule above, and you must still detect any
-  genuine fastener that has no matching candidate in either list.
-  1. "Concept-targeted candidate regions" - from a pass that searched the image specifically for
-     fastener-like concepts (bolt, screw, nut, fastener, rivet) using a text-prompted segmentation
-     model. This model has to understand what the WORD "bolt" visually means, similar to how you
-     do - so it can still miss the same atypical/ambiguous fasteners you might miss, but it is
-     generally relevant since it was looking for the same kind of object you are.
-  2. "Geometric candidate regions" - from a completely different, blind pass with NO text prompt
-     and NO understanding of what a fastener is at all: it flags any visually-distinct region by
-     low-level image structure alone (edges, texture boundaries), with no language involved.
-     Expect this list to contain background, brackets, shadows, dirt, and other non-fastener
-     clutter - but because it has no notion of "bolt," it can catch a fastener that looks unusual
-     or ambiguous enough to fool a language-based judgment (yours or the concept-targeted pass's),
-     purely because it's still a visually distinct region. Treat it as a broader, noisier
-     complement to list 1, not a replacement for it.
-  Both lists describe each candidate as a POLYGON, not a box: a list of [x, y] point pairs
-  (normalized 0-1000, same scale as box_2d) that trace the approximate outline of whatever that
-  pass segmented, in order around the shape. Use the polygon's actual outline - not just its rough
-  extent - to judge whether something looks fastener-shaped and to see where its real edges are;
-  this is richer information than a plain rectangle. When you do detect a fastener, your own output
-  box_2d must still be a tight bounding box per the box tightness rule above, regardless of whether
-  it came from a candidate polygon or was found independently - you are not asked to output
-  polygons yourself, only to use the polygons you're given as visual aids."""
+- Candidate regions: some images come with a list of "Concept-targeted candidate regions" - from a
+  pass that searched the image specifically for fastener-like concepts (bolt, screw, nut, fastener,
+  rivet) using a text-prompted segmentation model, run before you saw the image. This model has to
+  understand what the WORD "bolt" visually means, similar to how you do - so it can still miss the
+  same atypical/ambiguous fasteners you might miss, but in practice it finds real fasteners well -
+  treat it as a strong signal, not noise to filter past. It is NOT authoritative - a hint to help
+  you notice things, not a checklist to trust or reproduce blindly. You must still verify every
+  candidate independently against every rule above, and you must still detect any genuine fastener
+  that has no matching candidate at all.
+  Candidates are normally given as a VISUAL OVERLAY IMAGE, immediately after the raw photo: the
+  same photo with each candidate's outline drawn directly on it and numbered - use this to actually
+  SEE where each candidate is, at a glance, like you would for anything else in the photo. (Rare
+  fallback: if no overlay image was available, candidates are instead given as a numbered list of
+  raw polygon coordinates - [x, y] point pairs, normalized 0-1000, same scale as box_2d - describing
+  the same thing in text form only; treat that the same way, just via a different channel.) When
+  you do detect a fastener, your own output box_2d must still be a tight bounding box per the box
+  tightness rule above, regardless of whether it came from a candidate or was found independently -
+  you are not asked to output polygons yourself, only to use what you're given as a visual aid.
+  MANDATORY ACCOUNTING: you must account for every single numbered candidate by index in your
+  output's concept_candidate_dispositions field - one entry per candidate, no omissions, even for
+  an image with many candidates. For each: if it became one of your output boxes, mark
+  accepted=true and say which box. If not, mark accepted=false and give a SPECIFIC, concrete reason
+  (not a vague "not a fastener") - e.g. background/shadow with no real hardware there, a
+  cable-clamp body excluded by the box-scope rules, a duplicate of another candidate covering the
+  same physical fastener, or too occluded/blurred to classify confidently. You are still free to
+  output MORE boxes than there are candidates (detect real fasteners this pass missed entirely) -
+  this accounting requirement only means every candidate this pass DID surface must be explicitly
+  resolved, one way or the other, not silently dropped."""
 
 # Batch call prompt: images arrive as repeated (text-label, image-bytes) pairs, this final text
 # part tells the model how to report results back per-image.
@@ -282,7 +361,7 @@ boxes list instead. Do not invent an entry for a filename that wasn't shown to y
 def call_gemini_batch(
     client: genai.Client, image_paths: List[Path], model: str, retries: int, backoff: float,
     concept_hints: Optional[Dict[str, List[List[List[int]]]]] = None,
-    dumb_hints: Optional[Dict[str, List[List[List[int]]]]] = None,
+    concept_overlay_dir: Optional[Path] = None,
 ) -> Tuple[Dict[str, BoltAnnotation], int]:
     """One API call annotates ALL of image_paths together. Returns ({filename: BoltAnnotation},
     total_tokens_used - 0 if the call never went through). Any filename the model doesn't return
@@ -290,14 +369,22 @@ def call_gemini_batch(
     image (same as the old per-image None-return convention, just resolved per-file afterward
     instead of per-call).
 
-    concept_hints/dumb_hints: {filename: [polygon, ...]} read from cache/sam_regions_concept/ and
-    cache/sam_regions_dumb/ respectively, or None if no cache file existed for ANY pending image in
-    this batch from that source (treated as that source being disabled entirely). None means no
-    hint text of that kind is sent at all; an empty list for a given filename (that image has a
-    cache file, but the pass found nothing) is distinguished in the sent text from "no cache file
-    for this image" so the model isn't misled either way. Each polygon is
-    [[x,y], [x,y], ...] normalized 0-1000 - deliberately NOT simplified to a box (see
-    SYSTEM_PROMPT's "Candidate regions" rule for exactly how these are described to the model)."""
+    concept_hints: {filename: [polygon, ...]} read from cache/sam_regions_concept/, or None if no
+    cache file existed for ANY pending image in this batch (treated as that source being disabled
+    entirely). None means nothing is sent at all; an empty list for a given filename (that image
+    has a cache file, but the pass found nothing) is distinguished from "no cache file for this
+    image" so the model isn't misled either way.
+
+    concept_overlay_dir: the numbered mask overlay 03_propose_regions_concept.py already draws for
+    QC (qc/sam_proposals_concept/<filename>) - when it exists, THIS is what actually gets sent as
+    the candidate list (an image with each candidate's outline and index number drawn directly on
+    the photo), not the raw polygon coordinates. Real finding this session: asking a model to
+    mentally re-project dozens of raw [[x,y],...] numbers back onto the photo is a much harder,
+    more error-prone channel than just letting it SEE where the candidates are - plausibly a real
+    factor in a severe hallucination regression observed on one model under the raw-text-only
+    version of this prompt. Falls back to sending the raw polygon list as text only if the overlay
+    file doesn't exist for some reason (cache present but QC image missing) - see SYSTEM_PROMPT's
+    "Candidate regions" rule for how this is described to the model."""
     contents: list = []
     for p in image_paths:
         contents.append(f"Image: {p.name}")
@@ -305,33 +392,56 @@ def call_gemini_batch(
         if concept_hints is not None:
             polygons = concept_hints.get(p.name, [])
             if polygons:
-                contents.append(
-                    f"Concept-targeted candidate regions for {p.name}, from a text-prompted "
-                    f"segmentation pass that searched specifically for fastener-like concepts - "
-                    f"each is a polygon outline (list of [x,y] points, 0-1000 normalized, NOT a "
-                    f"bounding box), hints only, not authoritative: {polygons}"
-                )
+                overlay_path = concept_overlay_dir / p.name if concept_overlay_dir is not None else None
+                if overlay_path is not None and overlay_path.exists():
+                    # Real vs raw-text-coordinates comparison this session: dumping dozens of raw
+                    # [[x,y],...] numbers asks the model to mentally re-project them onto the
+                    # photo - extra effort, and a plausible source of the hallucination seen on at
+                    # least one real run. The overlay image already has each candidate's outline
+                    # AND its index number drawn directly on the photo (see draw_mask_overlay), so
+                    # that alone is the candidate list now - no redundant coordinate text.
+                    contents.append(
+                        f"Concept-targeted candidate regions for {p.name}: {len(polygons)} "
+                        f"candidate(s) from a text-prompted segmentation pass that searched "
+                        f"specifically for fastener-like concepts, numbered 0 to "
+                        f"{len(polygons) - 1} as drawn directly on the following overlay image - "
+                        f"hints only, not authoritative. You MUST return exactly {len(polygons)} "
+                        f"concept_candidate_dispositions entries for {p.name}."
+                    )
+                    contents.append(types.Part.from_bytes(
+                        data=overlay_path.read_bytes(), mime_type=_mime_for(overlay_path)
+                    ))
+                else:
+                    # Fallback for the rare/abnormal case where a candidate cache exists but its
+                    # QC overlay image doesn't - falls back to raw coordinate text so the model
+                    # still gets SOME candidate information rather than none.
+                    numbered = "; ".join(f"candidate {i}: {poly}" for i, poly in enumerate(polygons))
+                    contents.append(
+                        f"Concept-targeted candidate regions for {p.name} (no overlay image "
+                        f"available this time, raw coordinates only), from a text-prompted "
+                        f"segmentation pass that searched specifically for fastener-like concepts "
+                        f"- each is a polygon outline (list of [x,y] points, 0-1000 normalized, "
+                        f"NOT a bounding box), numbered by index, hints only, not authoritative: "
+                        f"{numbered}. You MUST return exactly {len(polygons)} "
+                        f"concept_candidate_dispositions entries for {p.name} (indices 0 to "
+                        f"{len(polygons) - 1})."
+                    )
             else:
-                contents.append(f"No concept-targeted candidate regions were found for {p.name}.")
-        if dumb_hints is not None:
-            polygons = dumb_hints.get(p.name, [])
-            if polygons:
-                contents.append(
-                    f"Geometric candidate regions for {p.name}, from a blind, concept-agnostic "
-                    f"segmentation pass with no text prompt and no understanding of what a "
-                    f"fastener is - broader and noisier than the concept-targeted list, expect "
-                    f"background/clutter - each is a polygon outline (list of [x,y] points, "
-                    f"0-1000 normalized, NOT a bounding box), hints only, not authoritative: "
-                    f"{polygons}"
-                )
-            else:
-                contents.append(f"No geometric candidate regions were found for {p.name}.")
+                contents.append(f"No concept-targeted candidate regions were found for {p.name} - "
+                                 f"return an empty concept_candidate_dispositions list for it.")
     contents.append(BATCH_USER_PROMPT)
 
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
         response_mime_type="application/json",
         response_schema=BatchAnnotation,
+        temperature=0,  # real regression observed this session with the default (non-zero)
+        # temperature: re-running the SAME image at the SAME PROMPT_VERSION produced a different,
+        # rule-violating result (two adjacent bolts on one clamp bracket merged into a single box,
+        # instead of one box per fastener) - with no temperature pinned, a before/after prompt
+        # comparison can't tell a real prompt regression apart from ordinary sampling noise. Pinning
+        # to 0 for a structured-extraction task like this is standard practice and makes future
+        # prompt iteration actually attributable.
     )
 
     last_err = None
@@ -351,7 +461,10 @@ def call_gemini_batch(
                         log.warning("  batch response had a duplicate entry for %s; keeping the "
                                     "first one", img.file)
                         continue
-                    by_file[img.file] = BoltAnnotation(boxes=img.boxes)
+                    by_file[img.file] = BoltAnnotation(
+                        boxes=img.boxes,
+                        concept_candidate_dispositions=img.concept_candidate_dispositions,
+                    )
                 return by_file, tokens
             last_err = f"response.parsed was None; raw text: {response.text[:500]!r}"
         except Exception as e:  # noqa: BLE001 - deliberately broad, this is a best-effort batch job
@@ -395,9 +508,9 @@ def main() -> None:
                               "Images cached under a different model are handled exactly like a "
                               "PROMPT_VERSION change: kept as-is by default, see --reannotate-stale.")
     parser.add_argument("--skip-region-hints", action="store_true",
-                         help="Ignore both cache/sam_regions_concept/ and cache/sam_regions_dumb/ "
-                              "even if those stages were run - send images with no hint text at "
-                              "all. Use this to A/B-test hint impact without deleting that cache.")
+                         help="Ignore cache/sam_regions_concept/ even if that stage was run - send "
+                              "images with no candidate hints at all. Use this to A/B-test hint "
+                              "impact without deleting that cache.")
     parser.add_argument("--limit", type=int, default=None,
                          help="Only consider the first N images from --src this run. This is the "
                               "ONLY thing that controls batch size - every image that still needs "
@@ -438,7 +551,7 @@ def main() -> None:
     out = args.out.resolve()
     raw_dir = out / "cache" / "raw_gemini"
     sam_regions_concept_cache_dir = out / "cache" / "sam_regions_concept"
-    sam_regions_dumb_cache_dir = out / "cache" / "sam_regions_dumb"
+    sam_regions_concept_qc_dir = out / "qc" / "sam_proposals_concept"
     gemini_raw_dir = out / "qc" / "gemini_raw"
 
     if args.clean:
@@ -458,6 +571,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(out / "run_log.txt", encoding="utf-8"), logging.StreamHandler()],
+        force=True,  # a package imported before this point (google-genai/etc.) may already have
+                     # attached its own root-logger handler, which makes a plain basicConfig() a
+                     # silent no-op - force=True always (re)configures regardless (see
+                     # 03_propose_regions_concept.py for the real crash that surfaced this).
     )
     log.info("Run started. Source: %s", src)
     if args.clean:
@@ -511,21 +628,15 @@ def main() -> None:
                           img_path.name, cached_model, cached_version, args.model, PROMPT_VERSION)
         pending.append(img_path)
 
-    # --- Build hints for `pending` from both upstream stages' cache output. See
+    # --- Build hints for `pending` from the upstream SAM3 concept-search cache. See
     # _load_hints_for's docstring for the None-vs-empty-dict-vs-per-image-missing semantics.
     concept_hints: Optional[Dict[str, List[List[List[int]]]]] = None
-    dumb_hints: Optional[Dict[str, List[List[List[int]]]]] = None
     if pending and not args.skip_region_hints:
         concept_hints = _load_hints_for(pending, sam_regions_concept_cache_dir,
                                          "SAM concept-proposal (run 03_propose_regions_concept.py)")
-        dumb_hints = _load_hints_for(pending, sam_regions_dumb_cache_dir,
-                                      "SAM geometric-proposal (run 02_propose_regions_dumb.py)")
         if concept_hints is None:
             log.warning("No SAM concept-proposal cache found for ANY pending image - did you run "
                         "03_propose_regions_concept.py first?")
-        if dumb_hints is None:
-            log.warning("No SAM geometric-proposal cache found for ANY pending image - did you "
-                        "run 02_propose_regions_dumb.py first?")
     elif pending:
         log.info("--skip-region-hints set - sending %d image(s) to %s with no segmentation hints",
                   len(pending), args.model)
@@ -538,7 +649,8 @@ def main() -> None:
         log.info("ANNOTATE (single batch API call covering %d image(s)): %s",
                   len(pending), ", ".join(p.name for p in pending))
         by_file, tokens = call_gemini_batch(
-            client, pending, args.model, args.retries, args.backoff, concept_hints, dumb_hints
+            client, pending, args.model, args.retries, args.backoff, concept_hints,
+            sam_regions_concept_qc_dir,
         )
         total_tokens += tokens
 
@@ -552,12 +664,22 @@ def main() -> None:
             raw_path.write_text(
                 json.dumps(
                     {"model": args.model, "prompt_version": PROMPT_VERSION,
-                     "boxes": [b.model_dump() for b in ann.boxes]},
+                     "boxes": [b.model_dump() for b in ann.boxes],
+                     "concept_candidate_dispositions": [
+                         d.model_dump() for d in ann.concept_candidate_dispositions
+                     ]},
                     indent=2,
                 ),
                 encoding="utf-8",
             )
             log.info("OK: %s -> %d box(es)", img_path.name, len(ann.boxes))
+            discarded = [d for d in ann.concept_candidate_dispositions if not d.accepted]
+            for d in discarded:
+                log.info("  DISCARDED concept candidate %d for %s: %s",
+                          d.index, img_path.name, d.reason)
+            if discarded:
+                log.info("  %s: %d/%d concept candidate(s) discarded (see reasons above)",
+                          img_path.name, len(discarded), len(ann.concept_candidate_dispositions))
             results[img_path] = ann
             done += 1
     else:

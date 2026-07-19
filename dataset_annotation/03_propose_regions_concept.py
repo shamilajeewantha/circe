@@ -79,6 +79,11 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(out / "run_log.txt", encoding="utf-8"), logging.StreamHandler()],
+        force=True,  # real bug found this session: importing sam3 at module load time attaches its
+                     # own root-logger StreamHandler first, which makes a plain basicConfig() a
+                     # silent no-op (Python's documented behavior when the root logger already has
+                     # handlers) - every log.info() call was being dropped with no error, no
+                     # run_log.txt entry, exit code 0. force=True always (re)configures regardless.
     )
     log.info("Run started. Source: %s", src)
 

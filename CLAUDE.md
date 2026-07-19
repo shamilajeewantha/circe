@@ -33,11 +33,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    re-explanation, no restating context already established in the conversation.** If genuinely
    necessary, one line of caveat may follow the command block, never precede it.
 
-5. **Do what was explicitly asked. If you see a problem or a better way, ASK — don't silently
-   substitute your own approach.** When an instruction is unambiguous, execute it as given. If you
-   think a different approach is safer/better/more correct, say so and ask before deviating — do not
-   just go implement the alternative and explain the reasoning afterward. Disagreement gets raised as
-   a question before action, not as a justification after the fact.
+5. **Do EXACTLY what was explicitly asked. Nothing more, nothing "extra," nothing "just in case."
+   Zero tolerance.** When an instruction is unambiguous, execute it literally — do not silently add
+   your own fallback, safety net, edge-case handling, or defensive extra branch that wasn't asked
+   for, no matter how small or well-reasoned it seems. This is not limited to big architectural
+   choices — an unrequested one-line fallback is the SAME violation as swapping out an entire
+   approach. If you see a problem, a missing edge case, or a better way, STOP and ASK before writing
+   a single line of it — do not implement it "just to be safe" and explain afterward. Silently
+   adding scope the user didn't ask for is not helpfulness, it is disobedience dressed up as
+   diligence, and it will be caught and called out every time. Reserve unprompted deviation ONLY for
+   cases where the literal instruction is genuinely impossible to execute at all — not merely
+   suboptimal, not merely "could break in an edge case you thought of." When in doubt, the answer is
+   always: ask first.
 
 ## Repository overview
 

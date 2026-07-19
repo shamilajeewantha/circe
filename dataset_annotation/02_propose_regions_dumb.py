@@ -78,6 +78,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler(out / "run_log.txt", encoding="utf-8"), logging.StreamHandler()],
+        force=True,  # a package imported before this point (sam2/torch/etc.) may already have
+                     # attached its own root-logger handler, which makes a plain basicConfig() a
+                     # silent no-op - force=True always (re)configures regardless (see
+                     # 03_propose_regions_concept.py for the real crash that surfaced this).
     )
     log.info("Run started. Source: %s", src)
 
