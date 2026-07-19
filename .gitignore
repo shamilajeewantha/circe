@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Secrets — API keys, never committed
+.env
+
 # Controller runtime logs
 controller/logs/
 

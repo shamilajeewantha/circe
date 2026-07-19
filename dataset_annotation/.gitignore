@@ -1,0 +1,21 @@
+# SAM checkpoints - large, re-downloadable via huggingface_hub, never source
+*.pt
+
+# Source photo dataset - external/large, same treatment as model_training/datasets/ at repo root
+npu_bolt/
+npu_bolt_cad_excluded/
+
+# Pipeline output - regenerable via the numbered scripts, not source
+annotations/
+
+# ultralytics' own auto-generated predict-run dumps (legacy from before the official-package
+# migration - defensive rule in case anything else creates a runs/ dir here later)
+runs/
+
+# Stray legacy output folder predating the current annotations/ layout - not deleted automatically,
+# just kept out of git until confirmed safe to remove
+er_16_annotations/
+
+# 01_remove_cad.py's log file - generated, not source (run_log.txt is already covered by
+# annotations/ above, since that's where it actually lives - out/run_log.txt)
+cleanup_cad_log.txt

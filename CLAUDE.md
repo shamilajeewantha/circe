@@ -29,6 +29,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    what to do next," reporting status, or laziness are NOT blockers. If you can keep going, keep going;
    if you are truly blocked, ask one precise question and resume the moment it is answered.
 
+4. **When asked for a command, give the exact runnable command first, immediately — no
+   re-explanation, no restating context already established in the conversation.** If genuinely
+   necessary, one line of caveat may follow the command block, never precede it.
+
+5. **Do what was explicitly asked. If you see a problem or a better way, ASK — don't silently
+   substitute your own approach.** When an instruction is unambiguous, execute it as given. If you
+   think a different approach is safer/better/more correct, say so and ask before deviating — do not
+   just go implement the alternative and explain the reasoning afterward. Disagreement gets raised as
+   a question before action, not as a justification after the fact.
+
 ## Repository overview
 
 This is **not a single application** — it's a collection of loosely related, independently-runnable
@@ -147,6 +157,27 @@ law for any future "drive a tracked point to an arbitrary target" feature — no
 tracking component; a real implementation needs to add point tracking (e.g. template matching) that
 this script doesn't address.
 
+### `dataset_annotation/` — NPU-BOLT re-annotation pipeline (4 staged scripts)
+
+Re-annotates the NPU-BOLT dataset into a 3-class YOLO defect-detection dataset
+(`bolt_ok`/`bolt_defective`/`bolt_corroded`) using Gemini + two local SAM passes for region hints
+and box tightening. Four numbered scripts, each owning one cost/resource concern so nothing
+expensive re-runs just to test a downstream stage — see `dataset_annotation/README.md` for the
+full pipeline diagram, flags, and output layout:
+
+```bash
+cd dataset_annotation
+python 02_propose_regions_dumb.py      # SAM2 promptless proposals - local/free
+python 03_propose_regions_concept.py   # SAM3 text-prompted proposals - local/free
+python 04_annotate_with_gemini.py      # the one Gemini batch call - costs real API quota
+python 05_tighten_boxes.py             # SAM3 box-tightening + final dataset/qc - local/free
+```
+
+Both SAM roles use the official Meta packages directly (`facebookresearch/sam3`,
+`facebookresearch/sam2`) in a dedicated WSL conda env requiring Python >= 3.12 — not `ultralytics`,
+which this pipeline used earlier before hitting a cascading CUDA OOM and an unreachable
+grid-density-tuning dead end (see `annotate_common.py`'s module docstring for the full writeup).
+
 ### `circe_v1/docs/mothership-scout.md` — design doc, no code yet
 
 Design for a future rover (Arduino Uno Q) that would port `DM002HW_controller_tests/drone.py` and
@@ -161,3 +192,10 @@ scripts: write a script that imports the target module, feed it synthetic data (
 for `flow_stabilizer.py`), assert expected behavior, and write results to a UTF-8 text file rather than
 printing directly — `print()` of certain characters can crash Windows' cp1252 console. Read the output
 file back afterward to confirm.
+
+**Progress logging is mandatory for any non-trivial loop.** Any loop expected to run more than a
+handful of iterations, or take more than a few seconds, must log an explicit `[i/N]`-style progress
+indicator per iteration (e.g. `log.info("[%d/%d] %s - ...", i, total, item)`), not just a bare
+per-item message with no count. A long-running script with no progress signal is a real usability
+problem — real feedback from a session where a 100-image batch gave no indication of how far
+through the run it was, only per-item log lines with no index/total.
