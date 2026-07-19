@@ -157,10 +157,9 @@ log = logging.getLogger("gemini_annotate")
 # and compared against on the next run - see the --reannotate-stale gating in main().
 DEFAULT_MODEL = "gemini-robotics-er-1.6-preview"
 
-# Bump this whenever CLASSES/SYSTEM_PROMPT changes meaningfully. Cached results record which
-# version produced them (alongside MODEL) so a taxonomy change is detected as staleness too, not
-# just a model change - see the --reannotate-stale gating in main().
-PROMPT_VERSION = 14  # v2: merged bolt_loose+bolt_damaged -> bolt_defective (3-class taxonomy)
+# Matches whichever SYSTEM_PROMPT_V<N> constant is currently active below (SYSTEM_PROMPT = ...).
+# Change this to the same number whenever you switch which one is active.
+PROMPT_VERSION = 3
                     # v3: explicit box-scope rule (head/cap + attached shank/thread only; never a
                     # bare shank with no head/nut in frame) - class names unchanged, only box
                     # geometry/consistency, so LABEL_MIGRATIONS has nothing to remap for this bump
@@ -245,8 +244,70 @@ PROMPT_VERSION = 14  # v2: merged bolt_loose+bolt_damaged -> bolt_defective (3-c
                     # candidate list; sending both was redundant and plausibly made the model work
                     # harder reconciling two representations of the same thing instead of just
                     # looking at the image. Geometry/labels unaffected.
+                    # v15: explicit user hypothesis, worth taking seriously - burning index numbers
+                    # onto the overlay image (candidate 0, 1, 2, ...) may bias the model toward
+                    # treating each number as something it needs to draw a box FOR, rather than
+                    # judging the highlighted region on its own visual merits. Removed numbers
+                    # entirely from what Gemini sees: the overlay image sent to Gemini is now drawn
+                    # with draw_numbers=False (03_propose_regions_concept.py writes a SEPARATE
+                    # unnumbered copy to qc/sam_proposals_concept_for_gemini/ specifically for this,
+                    # keeping the original numbered qc/sam_proposals_concept/ unchanged for OUR OWN
+                    # human QC inspection, which still benefits from numbers). The
+                    # ConceptCandidateDisposition schema also lost its `index` field - dispositions
+                    # are now matched back to regions purely by position/order, never by a number
+                    # the model has to read or produce. SYSTEM_PROMPT reworded throughout to say
+                    # "highlighted regions" generically instead of "numbered candidates", and now
+                    # states plainly that every highlighted region could be a bolt and, if it's not,
+                    # a reason is mandatory. Geometry/labels unaffected.
+                    # v16: three real problems reported after the v15 run. (1) "boxes in the air" -
+                    # Gemini apparently treating a highlighted region's mere existence as evidence a
+                    # fastener is there, rather than independently confirming it - added an explicit
+                    # statement that a highlighted region is a suggestion to LOOK, never evidence by
+                    # itself, and that rejecting one is a normal, expected, frequent outcome. (2)
+                    # close-together fasteners still sometimes merged into one box despite the v11
+                    # fix - added an explicit line that physical closeness is NEVER, by itself, a
+                    # reason to merge two fasteners. (3) bolt_defective confirmed via real evidence
+                    # (grepped all of cache/raw_gemini/*.json and dataset/labels/*.txt - 0
+                    # occurrences anywhere this session) to have never been produced - class
+                    # definition itself verified intact/unchanged in both annotate_common.py and
+                    # SYSTEM_PROMPT, so not a narrowing bug; added an explicit reminder that it's a
+                    # real independent category to check for on every fastener, same as corrosion,
+                    # BEFORE the (unchanged, deliberately-kept) corrosion-wins-ties rule applies.
+                    # Geometry/labels unaffected.
+                    # v17: real regressions found via visual QC on the v16 run, cross-checked
+                    # against the actual SAM3 masks (qc/sam_proposals_concept/*.jpg) for the exact
+                    # failure images - not guessed. (1) AUT-0006.jpg: Gemini boxed a location with
+                    # NO SAM3 region there at all (confirmed - only 3 masks existed, none near that
+                    # box) - a pure invention, not a hint-following error. (2) AUT-0008.jpg: SAM3
+                    # masks #28/#29 landed exactly on two real screws that Gemini discarded - a
+                    # real fastener wrongly rejected. (3) AUT-0007.jpg: SAM3 correctly marked small
+                    # individual bolt heads ON a latch mechanism (masks #20/#27 etc.), but Gemini's
+                    # box expanded to cover the whole mechanism housing instead of the individual
+                    # bolt. All three point the same way: SAM3's concept-search is comprehensive in
+                    # practice (confirmed - it marked every real fastener in all three images,
+                    # including the ones Gemini got wrong), so Gemini's job on these images should
+                    # be filtering what's already found, not inventing independently, and box
+                    # tightness should follow the highlighted region's own extent, not expand to a
+                    # surrounding housing. Also reworded the v16 "reject freely" framing (which
+                    # over-indexed toward rejection, plausibly contributing to (2)) into "reason
+                    # hard before accepting AND before rejecting" - rejecting a real fastener is now
+                    # explicitly stated as equally wrong as inventing a fake one, not a safer
+                    # default. Geometry/labels unaffected.
+                    # REVERTED to v15's content by explicit instruction, after re-testing v17 on the
+                    # same 3 failure images: AUT-0007's box-scope problem was genuinely fixed, but
+                    # AUT-0006 (phantom box, no supporting SAM3 region at all) and AUT-0008 (2 real
+                    # SAM3-marked screws still wrongly discarded) were UNCHANGED - 1 of 3 targeted
+                    # fixes actually landed. PROMPT_VERSION reset to the real "15" rather than bumped
+                    # to a new number, since the active text is byte-identical to true v15 - v16/v17
+                    # were edited in place and their exact text was NOT kept as separate constants,
+                    # so there is nothing distinct for a new number to point to. Standing practice
+                    # from this point forward (explicit instruction): every FUTURE distinct prompt
+                    # version gets its own preserved SYSTEM_PROMPT_V<N> constant (never edited in
+                    # place once superseded), with SYSTEM_PROMPT simply assigned to whichever is
+                    # currently active - so any future revert is a real, cheap reassignment, not a
+                    # lossy re-edit.
 
-SYSTEM_PROMPT = """You are labeling images of bolts, nuts, and other threaded fasteners for a
+SYSTEM_PROMPT_V1 = """You are labeling images of bolts, nuts, and other threaded fasteners for a
 robot inspection vision training set. For every individual fastener (bolt head, nut, or bolt+nut
 assembly) visible in the image, output one bounding box using exactly one of these three labels -
 no other labels are allowed:
@@ -315,34 +376,144 @@ Rules:
   cap, plus any same-fastener shank/thread per the box scope rule above) on that side - no padding,
   margin, or slack on any edge. A box that is visibly looser than the fastener it's drawn around,
   or that clips off part of the fastener, is wrong even if the label is correct.
-- Candidate regions: some images come with a list of "Concept-targeted candidate regions" - from a
-  pass that searched the image specifically for fastener-like concepts (bolt, screw, nut, fastener,
-  rivet) using a text-prompted segmentation model, run before you saw the image. This model has to
+- Highlighted regions: some images come with a set of highlighted regions - from a pass that
+  searched the image specifically for fastener-like concepts (bolt, screw, nut, fastener, rivet)
+  using a text-prompted segmentation model, run before you saw the image. This model has to
   understand what the WORD "bolt" visually means, similar to how you do - so it can still miss the
   same atypical/ambiguous fasteners you might miss, but in practice it finds real fasteners well -
   treat it as a strong signal, not noise to filter past. It is NOT authoritative - a hint to help
   you notice things, not a checklist to trust or reproduce blindly. You must still verify every
-  candidate independently against every rule above, and you must still detect any genuine fastener
-  that has no matching candidate at all.
-  Candidates are normally given as a VISUAL OVERLAY IMAGE, immediately after the raw photo: the
-  same photo with each candidate's outline drawn directly on it and numbered - use this to actually
-  SEE where each candidate is, at a glance, like you would for anything else in the photo. (Rare
-  fallback: if no overlay image was available, candidates are instead given as a numbered list of
-  raw polygon coordinates - [x, y] point pairs, normalized 0-1000, same scale as box_2d - describing
-  the same thing in text form only; treat that the same way, just via a different channel.) When
-  you do detect a fastener, your own output box_2d must still be a tight bounding box per the box
-  tightness rule above, regardless of whether it came from a candidate or was found independently -
-  you are not asked to output polygons yourself, only to use what you're given as a visual aid.
-  MANDATORY ACCOUNTING: you must account for every single numbered candidate by index in your
-  output's concept_candidate_dispositions field - one entry per candidate, no omissions, even for
-  an image with many candidates. For each: if it became one of your output boxes, mark
-  accepted=true and say which box. If not, mark accepted=false and give a SPECIFIC, concrete reason
-  (not a vague "not a fastener") - e.g. background/shadow with no real hardware there, a
-  cable-clamp body excluded by the box-scope rules, a duplicate of another candidate covering the
-  same physical fastener, or too occluded/blurred to classify confidently. You are still free to
-  output MORE boxes than there are candidates (detect real fasteners this pass missed entirely) -
-  this accounting requirement only means every candidate this pass DID surface must be explicitly
-  resolved, one way or the other, not silently dropped."""
+  highlighted region independently against every rule above, and you must still detect any genuine
+  fastener that has no highlighted region near it at all.
+  Regions are normally given as a VISUAL OVERLAY IMAGE, immediately after the raw photo: the same
+  photo with each region's outline drawn directly on it (no numbers or labels on the regions
+  themselves - just outlines) - use this to actually SEE where each region is, at a glance, like
+  you would for anything else in the photo. Judge each highlighted region purely by what it visibly
+  contains, never by a number or label - there isn't one. (Rare fallback: if no overlay image was
+  available, regions are instead given as a list of raw polygon coordinates - [x, y] point pairs,
+  normalized 0-1000, same scale as box_2d - describing the same thing in text form only; treat that
+  the same way, just via a different channel.) When you do detect a fastener, your own output
+  box_2d must still be a tight bounding box per the box tightness rule above, regardless of whether
+  it came from a highlighted region or was found independently - you are not asked to output
+  polygons yourself, only to use what you're given as a visual aid.
+  MANDATORY ACCOUNTING: every highlighted region could be a bolt - you must judge each one and
+  account for it in your output's concept_candidate_dispositions field, one entry per region, in
+  the same order the regions appear (reading the image left-to-right then top-to-bottom), no
+  omissions even for an image with many regions. For each: if it IS a bolt and became one of your
+  output boxes, mark accepted=true. If it is NOT a bolt, mark accepted=false and you MUST give a
+  SPECIFIC, concrete reason (not a vague "not a fastener") - e.g. background/shadow with no real
+  hardware there, a cable-clamp body excluded by the box-scope rules, the same physical fastener as
+  another region already boxed, or too occluded/blurred to classify confidently. You are still free
+  to output MORE boxes than there are highlighted regions (detect real fasteners this pass missed
+  entirely) - this accounting requirement only means every region this pass DID highlight must be
+  explicitly resolved, one way or the other, not silently dropped."""
+
+# Reconstructed from the actual diffs applied earlier this session (previously PROMPT_VERSION 16 -
+# "boxes in the air" + never-merge-by-proximity + bolt_defective visibility). Real regression found
+# via visual QC afterward: this framing over-indexed toward rejection ("do it freely"), plausibly
+# contributing to real fasteners being wrongly discarded - see V3's docstring for the fix that was
+# tried, and SYSTEM_PROMPT's assignment below for which of these three is currently active.
+SYSTEM_PROMPT_V2 = SYSTEM_PROMPT_V1.replace(
+    """- bolt_corroded: visible rust, pitting, or corrosion discoloration on the fastener's surface, EVEN
+  IF the fastener also looks loose/damaged (corrosion is frequently the root cause of the
+  mechanical symptom, and correct remediation differs - a corroded bolt should not simply be
+  tightened, it likely needs replacement).
+
+Rules:""",
+    """- bolt_corroded: visible rust, pitting, or corrosion discoloration on the fastener's surface, EVEN
+  IF the fastener also looks loose/damaged (corrosion is frequently the root cause of the
+  mechanical symptom, and correct remediation differs - a corroded bolt should not simply be
+  tightened, it likely needs replacement).
+
+bolt_defective is a real, expected, independent category - not a rare edge case, and not something
+that only applies when corrosion is absent. For EVERY fastener, evaluate its mechanical condition
+(is it rotated, protruding, backed-out, gapped from the mating surface, bent, sheared, cracked, or
+stripped?) on its own merits, the exact same way you already evaluate it for corrosion - do this
+check BEFORE the priority tie-break below, not instead of it. Only after you've genuinely checked
+both does the tie-break decide which single label wins when a fastener happens to show both.
+
+Rules:""",
+).replace(
+    """  box spanning from one nut to the other.
+- Box tightness:""",
+    """  box spanning from one nut to the other.
+  Physical CLOSENESS between two fasteners is NEVER, by itself, a reason to merge them into one
+  box. However tightly two fasteners are packed together, however small the gap between them - if
+  they are two separate pieces of hardware, they get two separate tight boxes. Distance to a
+  neighboring fastener has no bearing on this rule at all.
+- Box tightness:""",
+).replace(
+    """  fastener that has no highlighted region near it at all.
+  Regions are normally given as a VISUAL OVERLAY IMAGE,""",
+    """  fastener that has no highlighted region near it at all.
+  A region being highlighted is a suggestion to LOOK there - it is never, by itself, evidence that
+  a fastener is actually present. Do not box a highlighted region just because it was highlighted:
+  look closely and deeply at what that region actually contains before deciding, exactly as
+  carefully as you would look at any other part of the photo, and box it only if you independently
+  confirm real, visible fastener hardware there. Rejecting a highlighted region (accepted=false) is
+  a normal, expected, and frequent outcome, not a failure - do it freely whenever your own
+  independent look doesn't confirm real hardware, as long as you give the specific reason the
+  accounting rule below requires.
+  Regions are normally given as a VISUAL OVERLAY IMAGE,""",
+)
+
+# Reconstructed from the actual diffs applied earlier this session (previously PROMPT_VERSION 17 -
+# real regressions found via visual QC on V2, cross-checked against the actual SAM3 masks for the
+# exact failure images: AUT-0006.jpg had a box with NO supporting SAM3 region at all (pure
+# invention); AUT-0008.jpg had 2 real SAM3-marked screws wrongly discarded; AUT-0007.jpg had a box
+# that expanded to cover a whole latch mechanism instead of the individual SAM3-marked bolt heads
+# on it. Reworded "Highlighted regions" to say SAM3 is comprehensive in practice (filter, don't
+# invent) and to require reasoning hard in BOTH directions, not just toward rejection. Re-tested
+# against the same 3 images: the box-scope fix (AUT-0007) genuinely worked, but the other two
+# (AUT-0006 invention, AUT-0008 wrongful rejection) were UNCHANGED - only 1 of 3 targeted problems
+# actually landed, which is why V1 was reselected as active below rather than this one.
+SYSTEM_PROMPT_V3 = SYSTEM_PROMPT_V2.replace(
+    """  same atypical/ambiguous fasteners you might miss, but in practice it finds real fasteners well -
+  treat it as a strong signal, not noise to filter past. It is NOT authoritative - a hint to help
+  you notice things, not a checklist to trust or reproduce blindly. You must still verify every
+  highlighted region independently against every rule above, and you must still detect any genuine
+  fastener that has no highlighted region near it at all.
+  A region being highlighted is a suggestion to LOOK there - it is never, by itself, evidence that
+  a fastener is actually present. Do not box a highlighted region just because it was highlighted:
+  look closely and deeply at what that region actually contains before deciding, exactly as
+  carefully as you would look at any other part of the photo, and box it only if you independently
+  confirm real, visible fastener hardware there. Rejecting a highlighted region (accepted=false) is
+  a normal, expected, and frequent outcome, not a failure - do it freely whenever your own
+  independent look doesn't confirm real hardware, as long as you give the specific reason the
+  accounting rule below requires.""",
+    """  same atypical/ambiguous fasteners you might miss, but IN PRACTICE it is comprehensive: it
+  reliably finds and highlights essentially every real fastener in the image, including small or
+  partially-occluded ones. Given that, your main job on a highlighted-region image is to CAREFULLY
+  FILTER what's already been found, not to independently invent new detections - you should only
+  add a box with NO highlighted region near it at all when you are genuinely confident real
+  hardware is there, since a real fastener with no highlighted region anywhere near it should be a
+  rare exception, not routine. It is still NOT authoritative - you must verify every highlighted
+  region independently against every rule above - just don't treat "detect independently" as your
+  default mode of operation on these images.
+  A region being highlighted is a suggestion to LOOK there - it is never, by itself, evidence that
+  a fastener is actually present, and it is never, by itself, evidence that one is ABSENT either.
+  Reason hard in BOTH directions before deciding, not just one: before you ACCEPT a region (box it),
+  confirm you can actually see real fastener hardware there, not just a plausible-looking shape.
+  Before you REJECT a region (accepted=false), also confirm you've actually looked closely enough
+  to be sure it ISN'T a fastener - do not reject a region just to be cautious, and do not accept one
+  just because it was highlighted. If a highlighted region genuinely does show a real fastener, you
+  MUST box it, even if it's small, awkwardly lit, or oddly angled - rejecting a real fastener is
+  exactly as wrong as inventing a fake one, not a "safer" default. When you do accept a highlighted
+  region, your box should closely match that specific region's own extent (the fastener head/nut it
+  outlines) - do not let the box expand to cover a larger surrounding bracket, housing, or mechanism
+  just because the highlighted region touches or overlaps it; box only the individual fastener,
+  per the box scope and box tightness rules above.""",
+)
+
+# Currently active version - reassign this to switch versions instead of editing prompt text in
+# place (standing practice from here on: each future distinct version gets its own preserved
+# SYSTEM_PROMPT_V<N> constant above, never edited after being superseded, so a revert is always a
+# cheap, honest reassignment here, not a lossy re-edit). Currently V3 (explicit instruction) - see
+# V3's docstring above: only 1 of 3 targeted problems from that version's testing actually landed
+# (the box-scope/AUT-0007 fix), the other two (AUT-0006 invention, AUT-0008 wrongful rejection)
+# were unchanged versus V2.
+SYSTEM_PROMPT = SYSTEM_PROMPT_V2
+
 
 # Batch call prompt: images arrive as repeated (text-label, image-bytes) pairs, this final text
 # part tells the model how to report results back per-image.
@@ -377,14 +548,18 @@ def call_gemini_batch(
 
     concept_overlay_dir: the numbered mask overlay 03_propose_regions_concept.py already draws for
     QC (qc/sam_proposals_concept/<filename>) - when it exists, THIS is what actually gets sent as
-    the candidate list (an image with each candidate's outline and index number drawn directly on
-    the photo), not the raw polygon coordinates. Real finding this session: asking a model to
-    mentally re-project dozens of raw [[x,y],...] numbers back onto the photo is a much harder,
-    more error-prone channel than just letting it SEE where the candidates are - plausibly a real
-    factor in a severe hallucination regression observed on one model under the raw-text-only
-    version of this prompt. Falls back to sending the raw polygon list as text only if the overlay
-    file doesn't exist for some reason (cache present but QC image missing) - see SYSTEM_PROMPT's
-    "Candidate regions" rule for how this is described to the model."""
+    the candidate list (an image with each region's outline drawn directly on the photo, NO index
+    numbers - see draw_numbers=False in 03_propose_regions_concept.py), not the raw polygon
+    coordinates. Real finding this session: asking a model to mentally re-project dozens of raw
+    [[x,y],...] numbers back onto the photo is a much harder, more error-prone channel than just
+    letting it SEE where the regions are - plausibly a real factor in a severe hallucination
+    regression observed on one model under the raw-text-only version of this prompt. Numbers were
+    then dropped from the overlay image ITSELF too (an earlier version burned index numbers onto
+    it) on a further real concern: literal numbers on the photo may bias the model toward treating
+    each number as something to draw a box around, rather than judging the highlighted region on
+    its own visual merits. Falls back to sending the raw polygon list as text (still unnumbered)
+    only if the overlay file doesn't exist for some reason (cache present but QC image missing) -
+    see SYSTEM_PROMPT's "Candidate regions" rule for how this is described to the model."""
     contents: list = []
     for p in image_paths:
         contents.append(f"Image: {p.name}")
@@ -394,37 +569,34 @@ def call_gemini_batch(
             if polygons:
                 overlay_path = concept_overlay_dir / p.name if concept_overlay_dir is not None else None
                 if overlay_path is not None and overlay_path.exists():
-                    # Real vs raw-text-coordinates comparison this session: dumping dozens of raw
-                    # [[x,y],...] numbers asks the model to mentally re-project them onto the
-                    # photo - extra effort, and a plausible source of the hallucination seen on at
-                    # least one real run. The overlay image already has each candidate's outline
-                    # AND its index number drawn directly on the photo (see draw_mask_overlay), so
-                    # that alone is the candidate list now - no redundant coordinate text.
+                    # The overlay image has each region's outline drawn on the photo (no numbers -
+                    # see draw_mask_overlay's draw_numbers=False), so that alone is the region list
+                    # now - no redundant coordinate text, and nothing for the model to count/number.
                     contents.append(
-                        f"Concept-targeted candidate regions for {p.name}: {len(polygons)} "
-                        f"candidate(s) from a text-prompted segmentation pass that searched "
-                        f"specifically for fastener-like concepts, numbered 0 to "
-                        f"{len(polygons) - 1} as drawn directly on the following overlay image - "
-                        f"hints only, not authoritative. You MUST return exactly {len(polygons)} "
-                        f"concept_candidate_dispositions entries for {p.name}."
+                        f"Highlighted candidate regions for {p.name}: {len(polygons)} region(s) "
+                        f"from a text-prompted segmentation pass that searched specifically for "
+                        f"fastener-like concepts, outlined directly on the following overlay "
+                        f"image - hints only, not authoritative. You MUST return exactly "
+                        f"{len(polygons)} concept_candidate_dispositions entries for {p.name}, "
+                        f"one per highlighted region, in the order the regions appear reading the "
+                        f"image left-to-right then top-to-bottom."
                     )
                     contents.append(types.Part.from_bytes(
                         data=overlay_path.read_bytes(), mime_type=_mime_for(overlay_path)
                     ))
                 else:
                     # Fallback for the rare/abnormal case where a candidate cache exists but its
-                    # QC overlay image doesn't - falls back to raw coordinate text so the model
-                    # still gets SOME candidate information rather than none.
-                    numbered = "; ".join(f"candidate {i}: {poly}" for i, poly in enumerate(polygons))
+                    # QC overlay image doesn't - falls back to raw coordinate text (still no
+                    # per-region numbers) so the model still gets SOME region information.
+                    raw = "; ".join(str(poly) for poly in polygons)
                     contents.append(
-                        f"Concept-targeted candidate regions for {p.name} (no overlay image "
-                        f"available this time, raw coordinates only), from a text-prompted "
-                        f"segmentation pass that searched specifically for fastener-like concepts "
-                        f"- each is a polygon outline (list of [x,y] points, 0-1000 normalized, "
-                        f"NOT a bounding box), numbered by index, hints only, not authoritative: "
-                        f"{numbered}. You MUST return exactly {len(polygons)} "
-                        f"concept_candidate_dispositions entries for {p.name} (indices 0 to "
-                        f"{len(polygons) - 1})."
+                        f"Candidate regions for {p.name} (no overlay image available this time, "
+                        f"raw coordinates only), from a text-prompted segmentation pass that "
+                        f"searched specifically for fastener-like concepts - each is a polygon "
+                        f"outline (list of [x,y] points, 0-1000 normalized, NOT a bounding box), "
+                        f"hints only, not authoritative: {raw}. You MUST return exactly "
+                        f"{len(polygons)} concept_candidate_dispositions entries for {p.name}, "
+                        f"one per region, in the same order given here."
                     )
             else:
                 contents.append(f"No concept-targeted candidate regions were found for {p.name} - "
@@ -551,7 +723,11 @@ def main() -> None:
     out = args.out.resolve()
     raw_dir = out / "cache" / "raw_gemini"
     sam_regions_concept_cache_dir = out / "cache" / "sam_regions_concept"
-    sam_regions_concept_qc_dir = out / "qc" / "sam_proposals_concept"
+    # UNNUMBERED overlay dir (written by 03_propose_regions_concept.py specifically for this stage)
+    # - deliberately NOT qc/sam_proposals_concept/ (that copy has index numbers burned on for OUR
+    # OWN human QC inspection; sending numbers to Gemini risked biasing it toward treating each
+    # number as something to draw a box around - real concern raised this session).
+    sam_regions_concept_overlay_dir = out / "qc" / "sam_proposals_concept_for_gemini"
     gemini_raw_dir = out / "qc" / "gemini_raw"
 
     if args.clean:
@@ -650,7 +826,7 @@ def main() -> None:
                   len(pending), ", ".join(p.name for p in pending))
         by_file, tokens = call_gemini_batch(
             client, pending, args.model, args.retries, args.backoff, concept_hints,
-            sam_regions_concept_qc_dir,
+            sam_regions_concept_overlay_dir,
         )
         total_tokens += tokens
 
@@ -673,12 +849,14 @@ def main() -> None:
                 encoding="utf-8",
             )
             log.info("OK: %s -> %d box(es)", img_path.name, len(ann.boxes))
-            discarded = [d for d in ann.concept_candidate_dispositions if not d.accepted]
-            for d in discarded:
-                log.info("  DISCARDED concept candidate %d for %s: %s",
-                          d.index, img_path.name, d.reason)
+            # No index field on the model's response by design (see ConceptCandidateDisposition's
+            # docstring) - enumerate() here is OUR OWN positional index for the log line only,
+            # never something the model referenced or was asked to produce.
+            discarded = [(i, d) for i, d in enumerate(ann.concept_candidate_dispositions) if not d.accepted]
+            for i, d in discarded:
+                log.info("  DISCARDED region %d for %s: %s", i, img_path.name, d.reason)
             if discarded:
-                log.info("  %s: %d/%d concept candidate(s) discarded (see reasons above)",
+                log.info("  %s: %d/%d region(s) discarded (see reasons above)",
                           img_path.name, len(discarded), len(ann.concept_candidate_dispositions))
             results[img_path] = ann
             done += 1

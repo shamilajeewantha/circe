@@ -46,6 +46,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    suboptimal, not merely "could break in an edge case you thought of." When in doubt, the answer is
    always: ask first.
 
+   **This applies to EVERY related piece of state, not just the one item named.** When the user
+   gives a simple instruction ("call these three X, Y, Z"), apply the same simple, literal rule
+   uniformly to every related number/name/variable — do not invent your own "more correct" or
+   "more honest" exception for some adjacent piece of state the user didn't explicitly call out
+   (real example: told to rename three prompt versions to 1/2/3, and instead of also setting the
+   related cache-version counter to match, a separate "honestly-matching-history" number was
+   invented for it unasked — twice — because it "seemed more correct"). If a related piece of state
+   isn't explicitly covered by the instruction and you think it deserves different treatment, that
+   is exactly the moment to ask a one-line clarifying question — never to silently pick the answer
+   you think is smarter.
+
 ## Repository overview
 
 This is **not a single application** — it's a collection of loosely related, independently-runnable
@@ -164,16 +175,17 @@ law for any future "drive a tracked point to an arbitrary target" feature — no
 tracking component; a real implementation needs to add point tracking (e.g. template matching) that
 this script doesn't address.
 
-### `dataset_annotation/` — NPU-BOLT re-annotation pipeline (4 staged scripts)
+### `dataset_annotation/` — NPU-BOLT re-annotation pipeline (5 staged scripts)
 
 Re-annotates the NPU-BOLT dataset into a 3-class YOLO defect-detection dataset
 (`bolt_ok`/`bolt_defective`/`bolt_corroded`) using Gemini + two local SAM passes for region hints
-and box tightening. Four numbered scripts, each owning one cost/resource concern so nothing
-expensive re-runs just to test a downstream stage — see `dataset_annotation/README.md` for the
-full pipeline diagram, flags, and output layout:
+and box tightening. Numbered scripts, each owning one cost/resource concern so nothing expensive
+re-runs just to test a downstream stage — see `dataset_annotation/README.md` for the full pipeline
+diagram, flags, and output layout:
 
 ```bash
 cd dataset_annotation
+python 01_remove_cad.py                # one-time: move CAD-* synthetic renders out of npu_bolt/
 python 02_propose_regions_dumb.py      # SAM2 promptless proposals - local/free
 python 03_propose_regions_concept.py   # SAM3 text-prompted proposals - local/free
 python 04_annotate_with_gemini.py      # the one Gemini batch call - costs real API quota
@@ -184,6 +196,68 @@ Both SAM roles use the official Meta packages directly (`facebookresearch/sam3`,
 `facebookresearch/sam2`) in a dedicated WSL conda env requiring Python >= 3.12 — not `ultralytics`,
 which this pipeline used earlier before hitting a cascading CUDA OOM and an unreachable
 grid-density-tuning dead end (see `annotate_common.py`'s module docstring for the full writeup).
+`_draw_sonnet_qc.py` is a separate one-off comparison aid (not part of the numbered pipeline, no
+WSL/torch deps needed) that draws QC overlays for `cache/raw_sonnet/*.json` — Claude's own
+predictions, kept apart from Gemini's `cache/raw_gemini/` — so the two are visually comparable.
+
+### `model_training/` — YOLO26 training on a merged 11-class inspection dataset
+
+Trains/evaluates YOLO26 on a merged, multi-source structural-inspection defect dataset (concrete
+crack, corrosion, fluid patch, fire, smoke, gauge face, efflorescence, exposed rebar, spalling,
+loose bolt, missing bolt). Two layers:
+
+- **`model_training/pipeline/`** (FiftyOne-based) — turns the 12 read-only source datasets in
+  `model_training/datasets/` into the merged dataset. `datasets/` is a hard read-only invariant
+  (pipeline copies pixels out, never edits a source); the only writable file there is its own
+  `README.md`. Run order: `python pipeline/01_import.py` → `02_curate.py` (CLIP embeddings,
+  near-dup tagging, UMAP) → `03_export.py` (de-dup + stratified 70/20/10 split) → writes
+  `model_training/merged/` (`data.yaml`, `nc: 11`) + `model_training/reports/` (class balance,
+  UMAP domain map, per-class mosaics — `make_report.py` regenerates this and can run outside the
+  FiftyOne env). Needs the `drone_detect` conda env (`fiftyone`, `umap-learn`; torch/CLIP already
+  present). `config.py` is the single source of truth for the per-source class map.
+- **Top-level scripts** (`train.py`, `val.py`, `predict.py`, `export.py`, `prep_images.py`,
+  `plot_results.py`) — plain Ultralytics usage against `model_training/merged/data.yaml` (edit
+  constants at the top of each script, then run directly, e.g. `python train.py`). For training,
+  a WSL-native copy of the dataset is used for I/O speed (`~/datasets/circe_merged`), with
+  `data.yaml`'s `path:` pointed at that copy rather than the Windows-side `merged/`. `train.py`'s
+  own docstring documents the resume flow in detail — resuming is an **explicit** action
+  (`RESUME=True` + point at `last.pt`), guarded because `resume=True` against a finished/foreign
+  checkpoint silently restarts on Ultralytics' built-in defaults, not this project's data.
+
+All of `model_training/{datasets,merged,reports,runs,sample_*}/` and root-level `datasets/`
+(Ultralytics' own auto-download cache, e.g. `coco8`) are gitignored data dirs — each keeps only a
+`README.md` describing what belongs there and how to regenerate it (see each folder's README).
+
+### `dataset_creation/` — ad hoc bbox-drawing utility
+
+Small, early-stage subproject: `src/draw_bboxes.py` reads a master annotation JSON
+(`data/json/detections.json`) mapping image filename → detections, draws boxes onto every image in
+`data/inputs/`, and writes the result to `data/outputs/`. `data/{inputs,json,outputs}/` are
+gitignored working folders (see `data/README.md`); not part of the `dataset_annotation/` NPU-BOLT
+pipeline above — separate effort, no shared code.
+
+### `circe_v2/` — ESP32-CAM firmware (new hardware platform, no Python)
+
+Arduino/C++ firmware, unrelated to every subproject above (all of which are Python controlling the
+DM002HW toy drone or a Gazebo sim). `esp32_cam/CameraWebServer/` is the standard Arduino
+`CameraWebServer` example (streaming MJPEG web server + board/camera pin config for an ESP32-CAM
+module) with a CI workflow (`ci.yml`) and partition table (`partitions.csv`); `i2c/i2c.ino` is a
+standalone I2C example sketch. No build/run commands beyond the normal Arduino IDE/CLI flash flow
+for `.ino` sketches — nothing here is invoked from any Python subproject.
+
+### `my_slam_vggt_omega/` — VGGT-Omega streaming SLAM submap stitching (design/research stage)
+
+A Gradio app (`main.py`, `demo.launch(server_port=args.port)`) plus a processing pipeline
+(`pipeline.py`, `aligner.py`, `context_selector.py`, `glb_builder.py`) that runs VGGT-Omega (a
+feed-forward, batch-only 3D reconstruction model — imported as an external `vggt_omega` package,
+not vendored in this repo and not currently installed) over frame batches and stitches the
+per-batch submaps (each in its own arbitrary coordinate frame/scale) into one consistent global
+`.glb` map. **`RESEARCH.md`** is a July 2026 bug audit + literature review written after the global
+map came out visually broken (mirrored, duplicated structures, inconsistent submaps) — it documents
+four found bugs (scale never propagated into geometry, a missing viewer-convention transform, no
+confidence/edge filtering on the global map, single-anchor `Delta` accuracy) with root causes traced
+to specific lines; read it before touching alignment/merge logic, since it's the record of what was
+already tried and why.
 
 ### `circe_v1/docs/mothership-scout.md` — design doc, no code yet
 

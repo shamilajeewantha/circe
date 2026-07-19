@@ -104,22 +104,25 @@ class BoltBox(BaseModel):
 
 
 class ConceptCandidateDisposition(BaseModel):
-    """Accountability record for ONE concept-targeted (SAM3) candidate region: real user feedback
+    """Accountability record for ONE highlighted concept-targeted (SAM3) region: real user feedback
     this session was that Gemini appeared to silently ignore correct SAM3 hints on at least one
-    image, with no way to tell whether a given candidate was considered-and-rejected or never
-    looked at. Every concept-targeted candidate given for an image must get exactly one of these,
-    in index order - no silent drops."""
-    index: int = Field(description="0-based index of this candidate in the numbered "
-                                    "'Concept-targeted candidate regions' list as given for this image")
-    accepted: bool = Field(description="True if this candidate was turned into one of this "
-                                        "image's output boxes")
-    reason: str = Field(description="If accepted: which output box it became (e.g. 'box 0'). If "
-                                     "not accepted: a specific, concrete reason - not a generic "
-                                     "phrase like 'not a fastener'. E.g. 'background/shadow, no "
-                                     "hardware visible here', 'cable clamp body, excluded by rule, "
-                                     "not a structural bolt', 'duplicate of candidate 2 - same "
-                                     "fastener already boxed', 'too blurred/occluded to classify "
-                                     "confidently'.")
+    image, with no way to tell whether a given region was considered-and-rejected or never looked
+    at. Every highlighted region given for an image must get exactly one of these - no silent
+    drops. Deliberately has NO index/number field - an earlier version numbered each region and
+    burned that number onto the overlay image sent to Gemini, and real user concern this session
+    was that literal numbers on the photo could bias the model toward treating each number as
+    something to draw a box around, rather than judging the highlighted region on its own visual
+    merits. Ordering alone (same order regions were given) is enough to line dispositions back up
+    to regions in code - the model never needs to name or number which region it means."""
+    accepted: bool = Field(description="True if this region was judged to contain a genuine "
+                                        "fastener and became one of this image's output boxes")
+    reason: str = Field(description="If accepted: brief, e.g. 'matched a real fastener'. If NOT "
+                                     "accepted (this region is not a bolt): a specific, concrete "
+                                     "reason - not a generic phrase like 'not a fastener'. E.g. "
+                                     "'background/shadow, no hardware visible here', 'cable clamp "
+                                     "body, excluded by rule, not a structural bolt', 'same "
+                                     "fastener as another region already boxed', 'too "
+                                     "blurred/occluded to classify confidently'.")
 
 
 class BoltAnnotation(BaseModel):
@@ -134,9 +137,9 @@ class ImageBoxes(BaseModel):
     file: str = Field(description="Exact filename as given in that image's 'Image: <filename>' label")
     boxes: List[BoltBox]
     concept_candidate_dispositions: List[ConceptCandidateDisposition] = Field(
-        description="EXACTLY one entry per concept-targeted candidate region given for this image, "
-                    "in index order (0, 1, 2, ...) - omit nothing, even if this image had zero "
-                    "concept-targeted candidates (then this is just an empty list)."
+        description="EXACTLY one entry per highlighted concept-targeted region given for this "
+                    "image, in the same order those regions were shown - omit nothing, even if "
+                    "this image had zero such regions (then this is just an empty list)."
     )
 
 
@@ -650,7 +653,8 @@ def draw_visualization(image_path: Path, ann: BoltAnnotation, out_path: Path) ->
 
 
 def draw_mask_overlay(
-    image_path: Path, masks: List[np.ndarray], color: tuple, out_path: Path, alpha: float = 0.45
+    image_path: Path, masks: List[np.ndarray], color: tuple, out_path: Path, alpha: float = 0.45,
+    draw_numbers: bool = True,
 ) -> None:
     """QC image showing every candidate mask actually sent as a hint for this image, drawn as a
     real alpha-blended colored overlay on the REAL mask pixels - not a simplified polygon outline.
@@ -658,9 +662,15 @@ def draw_mask_overlay(
     visualizes segmentation results, and it loses zero shape information (a prior version of this
     function drew simplified cv2.approxPolyDP outlines instead, which could visually distort an
     irregular real mask enough to barely read as "the mask" any more - real user feedback this
-    session). `color` is BGR (SAM_CONCEPT_COLOR or SAM_DUMB_COLOR). Also draws a numbered outline
-    on top of each mask (thin, same color) so individual candidates stay distinguishable when
-    several overlap, cross-referencing the same list order as the accompanying cache/ JSON."""
+    session). `color` is BGR (SAM_CONCEPT_COLOR or SAM_DUMB_COLOR).
+
+    draw_numbers: if True (default - unchanged behavior for human-facing QC images), also draws a
+    numbered outline on top of each mask so individual candidates stay distinguishable when several
+    overlap. Real user concern this session about the version of this image sent TO GEMINI
+    specifically (not the human QC copy): burning index numbers onto the photo may bias the model
+    toward treating each number as something to draw a box around, rather than treating the
+    highlighted region itself as the hint - pass False for that copy so Gemini only sees colored
+    region outlines, no numbers at all."""
     img = cv2.imread(str(image_path))
     height, width = img.shape[:2]
     overlay = img.copy()
@@ -682,6 +692,8 @@ def draw_mask_overlay(
         if not contours:
             continue
         cv2.drawContours(blended, contours, -1, color, line_width)
+        if not draw_numbers:
+            continue
         largest = max(contours, key=cv2.contourArea)
         x0, y0 = int(largest[0][0][0]), int(largest[0][0][1])
         cv2.putText(blended, str(i), (x0 + 2, max(0, y0 - 3)), font, font_scale, (0, 0, 0),

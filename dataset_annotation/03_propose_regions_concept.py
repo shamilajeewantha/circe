@@ -72,8 +72,15 @@ def main() -> None:
     out = args.out.resolve()
     cache_dir = out / "cache" / "sam_regions_concept"
     qc_dir = out / "qc" / "sam_proposals_concept"
+    # Separate, UNNUMBERED copy specifically for what gets sent to Gemini (04_annotate_with_gemini.py
+    # reads this dir, not qc_dir above) - real user concern this session: burning index numbers onto
+    # the photo may bias the model toward treating each number as something to draw a box around,
+    # rather than treating the highlighted region itself as the hint. qc_dir above (numbered) is kept
+    # unchanged for OUR OWN human QC inspection, which has relied on those numbers all session.
+    gemini_overlay_dir = out / "qc" / "sam_proposals_concept_for_gemini"
     cache_dir.mkdir(parents=True, exist_ok=True)
     qc_dir.mkdir(parents=True, exist_ok=True)
+    gemini_overlay_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -146,6 +153,8 @@ def main() -> None:
             encoding="utf-8",
         )
         draw_mask_overlay(img_path, masks, SAM_CONCEPT_COLOR, qc_dir / img_path.name)
+        draw_mask_overlay(img_path, masks, SAM_CONCEPT_COLOR, gemini_overlay_dir / img_path.name,
+                           draw_numbers=False)
         log.info("[%d/%d] %s - %d concept-targeted candidate region(s) proposed", i, total,
                   img_path.name, len(polygons))
         proposed += 1
