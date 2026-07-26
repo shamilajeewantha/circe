@@ -66,8 +66,8 @@ DEFAULT_SAM3_CHECKPOINT = str(_LOCAL_SAM3_CHECKPOINT) if _LOCAL_SAM3_CHECKPOINT.
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--src", type=Path, default=Path(__file__).parent / "npu_bolt")
-    parser.add_argument("--out", type=Path, default=Path(__file__).parent / "annotations")
+    parser.add_argument("--src", type=Path, default=Path(__file__).parent / "circe_datasets" / "npu_bolt" / "working_images")
+    parser.add_argument("--out", type=Path, default=Path(__file__).parent / "circe_datasets" / "npu_bolt")
     parser.add_argument("--sam3-checkpoint", type=str, default=DEFAULT_SAM3_CHECKPOINT,
                          help=f"Path to a local sam3.pt (default {DEFAULT_SAM3_CHECKPOINT!r} - "
                               f"auto-detected next to this script if present). If not given and no "

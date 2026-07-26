@@ -44,8 +44,8 @@ DEFAULT_SAM3_CHECKPOINT = str(_LOCAL_SAM3_CHECKPOINT) if _LOCAL_SAM3_CHECKPOINT.
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--src", type=Path, default=Path(__file__).parent / "npu_bolt")
-    parser.add_argument("--out", type=Path, default=Path(__file__).parent / "annotations")
+    parser.add_argument("--src", type=Path, default=Path(__file__).parent / "circe_datasets" / "npu_bolt" / "working_images")
+    parser.add_argument("--out", type=Path, default=Path(__file__).parent / "circe_datasets" / "npu_bolt")
     parser.add_argument("--concepts", type=str, default=",".join(DEFAULT_CONCEPTS),
                          help=f"Comma-separated text concepts SAM3 searches for (default "
                               f"{','.join(DEFAULT_CONCEPTS)!r}).")

@@ -27,32 +27,37 @@ mechanical symptom (a corroded bolt needs replacement, not just tightening).
 (No missing/empty-hole class this round - see conversation history: that class
 needs a different pipeline entirely and is deliberately out of scope here.)
 
-BATCHING
+BATCHING (auto-chunked - explicit instruction: the caller should never have to hand-pick a size)
 --------
 Every image that needs annotating in a given run (i.e. not already cached under the current
-model+taxonomy) goes into ONE Gemini API call - no automatic chunking/splitting. Each image is
-sent as an "Image: <filename>" text part immediately followed by its bytes, and the model is
-asked to return one result per image tagged with that same filename so results can be matched
-back up. Per-image caching (cache/raw_gemini/<stem>.json) is unchanged either way.
+model+taxonomy) is automatically split into as many chunks as needed via
+chunk_images_for_budget() to stay under the REAL confirmed input-token cap for --model (see "REAL
+INPUT-TOKEN CEILING" below) - you never need to pick a --limit small enough to fit one request;
+pass any --limit (or none) and the chunking happens internally, one generate_content() call per
+chunk. Each image within a chunk is sent as an "Image: <filename>" text part immediately followed
+by a File-API reference to its bytes (see call_gemini_batch), and the model is asked to return one
+result per image tagged with that same filename so results can be matched back up within that
+chunk. Per-image caching (cache/raw_gemini/<stem>.json, or cache/raw_gemini_pass{N}/ in multi-pass
+mode) is unchanged either way, and is what makes a second run - or a run that failed partway
+through several chunks - just pick up wherever the last one stopped.
 
-There is no built-in cap on how many images go into that one call - batch size is controlled
-entirely by --limit (how many images from --src are even considered this run) plus how many of
-those are already cached. If you want to control how large a single request is (payload size,
-token usage, blast radius of one failed call), set --limit yourself and run the script multiple
-times - the resumable cache means a second run just picks up wherever the first stopped. See
-Google's own docs for the actual hard per-request ceilings if you need to reason about how far you
-can push --limit: 100MB inline payload cap
-(https://ai.google.dev/gemini-api/docs/file-input-methods), 3,600 images/request
-(https://ai.google.dev/gemini-api/docs/image-understanding), and for gemini-3.5-flash specifically
-1,048,576 input / 65,536 output tokens per request
-(https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash) - none of these are enforced by
-this script; a request that exceeds them fails at the API and shows up as a FAILED batch call in
-run_log.txt.
+--limit still caps the total image COUNT considered this run (independent of chunking) - the
+resumable cache means a second run with a different --limit just covers more, same as always.
 
-If the response is missing an entry for some image in the call (truncated output, or the model
-dropping/mis-tagging one), that image is logged and written to failures.txt - it is NOT retried
-automatically at a smaller size. Just re-run the script (with a smaller --limit if you want) and
-the missing image gets picked up as still-pending.
+Chunk boundaries are planned from a fast offline estimate (no network calls needed to plan
+potentially hundreds of images - see ESTIMATED_TOKENS_PER_IMAGE/ESTIMATED_FIXED_TOKENS_PER_CALL);
+each actual chunk still gets a REAL count_tokens() pre-flight check inside call_gemini_batch as
+the authoritative confirmation before it's ever sent. See Google's own docs for the OTHER hard
+per-request ceilings this script does not itself chunk around (still just logged, never enforced):
+100MB inline payload cap (https://ai.google.dev/gemini-api/docs/file-input-methods) and 3,600
+images/request (https://ai.google.dev/gemini-api/docs/image-understanding) - in practice the
+131,072-input-token ceiling is reached first for this pipeline's typical image sizes.
+
+If the response is missing an entry for some image in a chunk's call (truncated output, or the
+model dropping/mis-tagging one), that image is logged and written to failures.txt - it is NOT
+retried automatically at a smaller size within that chunk. Just re-run the script and the missing
+image gets picked up as still-pending (other successful chunks are untouched, thanks to the
+per-image cache).
 
 Setup
 -----
@@ -67,7 +72,8 @@ Usage
 -----
     python 03_propose_regions_concept.py          # stage 2 (recommended - this stage's real input)
     python 04_annotate_with_gemini.py --limit 10  # smoke test first
-    python 04_annotate_with_gemini.py             # full run over everything in npu_bolt/
+    python 04_annotate_with_gemini.py             # full run over everything in npu_bolt/, auto-chunked
+    python 04_annotate_with_gemini.py --passes 5  # 5 independent passes -> 06_vote_consensus.py next
 
 Rate limits: check YOUR actual free-tier numbers at
 https://aistudio.google.com/rate-limit?timeRange=last-28-days (they're account-specific, not
@@ -91,6 +97,15 @@ to this task than a general-purpose chat model. Confirmed from Google's docs
 box_2d=[ymin,xmin,ymax,xmax]/1000 format and supports response_schema structured output, and its
 free-tier limits (5 RPM / 250K TPM / 20 RPD) are no worse than 3.5-flash's.
 
+REAL INPUT-TOKEN CEILING (confirmed via a real 400 ClientError, cross-checked against
+https://ai.google.dev/gemini-api/docs/robotics-overview and the DeepMind model card, both agree):
+131,072 input tokens / 65,536 output tokens - NOT the 1,048,576 Google's docs briefly (and
+incorrectly) showed for this model. Regression on this session's real run_log.txt data: ~2,240
+marginal input tokens per image + ~2,700 fixed tokens/call overhead (system prompt + wrapper text),
+so the real safe batch size is roughly (131,072 - 2,700) / 2,240 ~= 55-57 images - see
+MODEL_MAX_INPUT_TOKENS below and call_gemini_batch's pre-flight count_tokens() check, which reports
+the REAL number for a given batch before it's ever sent.
+
 Tested so far (real npu_bolt/ photos, small --limit): classification/label quality was good
 ("super great" per direct feedback), so system_instruction IS apparently being honored well enough
 - that unverified risk looks resolved in practice, though not against a large batch yet. BUT
@@ -106,7 +121,7 @@ SAM tightening pass is the mitigation for that; QC-by-eye via qc/visualized/ can
 
 Multi-image batching (this script's whole call_gemini_batch approach) is still unverified for this
 model specifically - Google's examples are all single-image. Watch for filename-attribution issues
-if running a large --limit on Robotics-ER.
+on a large chunk.
 
 See the model options list above DEFAULT_MODEL for other models tried/considered and their status.
 Switch models any time via --model, no code edit needed - see main()'s argparse setup below. If a
@@ -125,10 +140,11 @@ from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 from annotate_common import (
     CLASSES, IMG_EXTS, BoltAnnotation, BatchAnnotation, draw_visualization, filter_valid_boxes,
-    migrate_boxes, _mime_for,
+    _mime_for,
 )
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -154,12 +170,68 @@ log = logging.getLogger("gemini_annotate")
 #
 # Default only - override per-run with --model, no code edit needed (e.g. --model gemini-3.5-flash
 # to go back to Flash). Whichever model actually ran is what gets tagged into cache/raw_gemini/*.json
-# and compared against on the next run - see the --reannotate-stale gating in main().
+# and compared against on the next run - a mismatch (different model or PROMPT_VERSION) is always
+# automatically re-annotated in main(), no flag needed.
 DEFAULT_MODEL = "gemini-robotics-er-1.6-preview"
+
+# Prefix tagged onto every File API upload's display_name (see call_gemini_batch) - lets the
+# finally: cleanup sweep find and delete ANY file this script ever uploaded via a client.files.list()
+# scan, even one whose upload() call was interrupted (e.g. Ctrl+C) before its return value could be
+# locally tracked for the normal by-name delete. Confirmed via the SDK source
+# (google/genai/files.py Files.upload) that the file object - including display_name - is created
+# server-side BEFORE the byte upload begins, so it exists to be found even if the upload never
+# locally completed.
+UPLOADED_FILE_DISPLAY_NAME_PREFIX = "circe-annotate-"
+
+# Google's documented hard per-request ceilings, promoted from comment-only citations into real
+# constants so actual usage can be logged against them every run - reference only, never
+# enforced/blocked here (this script has no way to know your account's actual live limits, only
+# what Google publishes).
+GOOGLE_MAX_PAYLOAD_MB = 100.0               # inline payload cap
+                                             # https://ai.google.dev/gemini-api/docs/file-input-methods
+GOOGLE_MAX_IMAGES_PER_REQUEST = 3600        # https://ai.google.dev/gemini-api/docs/image-understanding
+
+# Real, per-model INPUT/OUTPUT token caps - the gemini-3.5-flash number previously used as a
+# stand-in for every model turned out to be genuinely wrong for gemini-robotics-er-1.6-preview: a
+# real 400 ClientError this session ("The input token count exceeds the maximum number of tokens
+# allowed 131072") confirmed the ACTUAL cap is 131,072 in / 65,536 out - 8x smaller. Cross-checked
+# against https://ai.google.dev/gemini-api/docs/robotics-overview ("Input token limit: 131,072 /
+# Output token limit: 65,536") and the DeepMind model card (deepmind.google/models/model-cards/
+# gemini-robotics-er-1-6 - "128k context window" / "64K token output", same numbers). Google's own
+# docs briefly showed 1,048,576 for this exact model before being corrected - see
+# https://discuss.ai.google.dev/t/gemini-robotics-er-1-6-preview-input-token-limit-doesnt-match-documentation/140573
+# - so a documented number for ONE model is never a safe stand-in for another.
+MODEL_MAX_INPUT_TOKENS = {
+    "gemini-robotics-er-1.6-preview": 131_072,
+}
+MODEL_MAX_OUTPUT_TOKENS = {
+    "gemini-robotics-er-1.6-preview": 65_536,
+}
+# Fallback ONLY for a --model not yet confirmed above - gemini-3.5-flash's own documented number,
+# explicitly NOT assumed accurate for any other model (see the mismatch that prompted this fix).
+FALLBACK_MAX_INPUT_TOKENS = 1_048_576  # https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash
+
+# Real regression from this session's actual run_log.txt data (7 real batches, 250 images total:
+# 92039/40, 70009/30, 70219/30, 69653/30, 92605/40, 92395/40, 92511/40 prompt-tokens/images) - used
+# ONLY by chunk_images_for_budget() below to plan chunk boundaries WITHOUT any network call, so
+# planning a chunk split over a large --limit doesn't itself require uploading every candidate
+# image first. The REAL, authoritative check still happens per actual chunk inside
+# call_gemini_batch via a real count_tokens() call before every generate_content() send - this
+# estimate only decides where to draw chunk boundaries, it never gates a send.
+ESTIMATED_TOKENS_PER_IMAGE = 2240
+ESTIMATED_FIXED_TOKENS_PER_CALL = 2700  # system prompt + BATCH_USER_PROMPT + per-image "Image: x" labels
+CHUNK_SAFETY_MARGIN = 0.9  # plan chunks to use at most 90% of the real input-token cap
 
 # Matches whichever SYSTEM_PROMPT_V<N> constant is currently active below (SYSTEM_PROMPT = ...).
 # Change this to the same number whenever you switch which one is active.
-PROMPT_VERSION = 3
+# Bumped 3 -> 4 for the new SYSTEM_PROMPT_V3 (crooked-fastener bolt_defective rule, explicit
+# instruction): every image already cached under raw_gemini/*.json is tagged prompt_version=3 from
+# when SYSTEM_PROMPT was pointed at V2's content - if this stayed 3, all of that existing cache
+# would be wrongly treated as "already current" for the NEW V3 content and silently keep its old
+# label, so the crooked-fastener rule would never actually apply to any already-annotated image.
+# Bumping to a fresh, never-before-used number correctly flags all existing cache as stale, which
+# is now always automatically re-annotated on the next run (real API cost) - no flag needed.
+PROMPT_VERSION = 4
                     # v3: explicit box-scope rule (head/cap + attached shank/thread only; never a
                     # bare shank with no head/nut in frame) - class names unchanged, only box
                     # geometry/consistency, so LABEL_MIGRATIONS has nothing to remap for this bump
@@ -457,17 +529,14 @@ Rules:""",
   Regions are normally given as a VISUAL OVERLAY IMAGE,""",
 )
 
-# Reconstructed from the actual diffs applied earlier this session (previously PROMPT_VERSION 17 -
-# real regressions found via visual QC on V2, cross-checked against the actual SAM3 masks for the
-# exact failure images: AUT-0006.jpg had a box with NO supporting SAM3 region at all (pure
-# invention); AUT-0008.jpg had 2 real SAM3-marked screws wrongly discarded; AUT-0007.jpg had a box
-# that expanded to cover a whole latch mechanism instead of the individual SAM3-marked bolt heads
-# on it. Reworded "Highlighted regions" to say SAM3 is comprehensive in practice (filter, don't
-# invent) and to require reasoning hard in BOTH directions, not just toward rejection. Re-tested
-# against the same 3 images: the box-scope fix (AUT-0007) genuinely worked, but the other two
-# (AUT-0006 invention, AUT-0008 wrongful rejection) were UNCHANGED - only 1 of 3 targeted problems
-# actually landed, which is why V1 was reselected as active below rather than this one.
-SYSTEM_PROMPT_V3 = SYSTEM_PROMPT_V2.replace(
+# SUPERSEDED - kept only so its exact text isn't lost, never re-activate under the name "V3":
+# this was the "filter, don't invent" experiment (SAM3-is-comprehensive framing). Re-tested against
+# 3 known-bad images: the box-scope fix (AUT-0007) genuinely worked, but the other two (AUT-0006
+# phantom-box invention, AUT-0008 wrongful rejection) were UNCHANGED - only 1 of 3 targeted problems
+# actually landed, so it was never made active (SYSTEM_PROMPT stayed on V2). Explicit instruction
+# reused the name "V3" below for new, unrelated content built on V2 - see SYSTEM_PROMPT_V3 further
+# down for what's actually active.
+_SYSTEM_PROMPT_V3_FILTER_DONT_INVENT_SUPERSEDED = SYSTEM_PROMPT_V2.replace(
     """  same atypical/ambiguous fasteners you might miss, but in practice it finds real fasteners well -
   treat it as a strong signal, not noise to filter past. It is NOT authoritative - a hint to help
   you notice things, not a checklist to trust or reproduce blindly. You must still verify every
@@ -505,14 +574,38 @@ SYSTEM_PROMPT_V3 = SYSTEM_PROMPT_V2.replace(
   per the box scope and box tightness rules above.""",
 )
 
+# ACTIVE. Explicit instruction: V2 confirmed as the best base so far (the filter-don't-invent
+# experiment above didn't pan out); this bumps V2's bolt_defective definition to also catch a
+# fastener that's visibly CROOKED/TILTED/not driven straight - e.g. a bolt or nail-like fastener
+# leaning at an angle instead of sitting perpendicular/flush to its mounting surface - as its own,
+# standalone sufficient condition for bolt_defective, even with no other symptom (no visible
+# rotation/gap/bending of the material itself). Real gap being closed: the pre-existing wording
+# ("bent... or otherwise mechanically deformed") describes the FASTENER'S OWN material being bent,
+# not the whole fastener sitting crooked in its hole/seat - a crooked-but-otherwise-undamaged
+# fastener could previously fall through the cracks toward bolt_ok. Geometry/box rules unaffected.
+SYSTEM_PROMPT_V3 = SYSTEM_PROMPT_V2.replace(
+    """- bolt_defective: a NON-corrosion mechanical problem is visible - rotation, protrusion, backing-out,
+  a gap between the fastener and the mating surface (not fully tightened), OR the head/thread/body
+  is visibly bent, sheared, cracked, stripped, or otherwise mechanically deformed. Covers both
+  "loose" and "damaged" as one class - do not try to distinguish them further.""",
+    """- bolt_defective: a NON-corrosion mechanical problem is visible - rotation, protrusion, backing-out,
+  a gap between the fastener and the mating surface (not fully tightened), OR the head/thread/body
+  is visibly bent, sheared, cracked, stripped, or otherwise mechanically deformed. Covers both
+  "loose" and "damaged" as one class - do not try to distinguish them further.
+  CROOKED counts on its own, with no other symptom required: if the fastener is visibly NOT sitting
+  straight/plumb relative to the surface it's driven into or mounted on - tilted, leaning, angled
+  off-axis, the way a crooked/bent nail sits instead of one driven straight in - that alone makes it
+  bolt_defective. Do not require a second symptom (rotation, a visible gap, bent material) before
+  applying this; crookedness of the fastener's own mounting angle is sufficient by itself.""",
+)
+
 # Currently active version - reassign this to switch versions instead of editing prompt text in
 # place (standing practice from here on: each future distinct version gets its own preserved
 # SYSTEM_PROMPT_V<N> constant above, never edited after being superseded, so a revert is always a
-# cheap, honest reassignment here, not a lossy re-edit). Currently V3 (explicit instruction) - see
-# V3's docstring above: only 1 of 3 targeted problems from that version's testing actually landed
-# (the box-scope/AUT-0007 fix), the other two (AUT-0006 invention, AUT-0008 wrongful rejection)
-# were unchanged versus V2.
-SYSTEM_PROMPT = SYSTEM_PROMPT_V2
+# cheap, honest reassignment here, not a lossy re-edit). Currently V3 (explicit instruction, see
+# V3's comment above) - built on V2, the confirmed-best base, adding the crooked-fastener rule to
+# bolt_defective.
+SYSTEM_PROMPT = SYSTEM_PROMPT_V3
 
 
 # Batch call prompt: images arrive as repeated (text-label, image-bytes) pairs, this final text
@@ -529,16 +622,17 @@ its "Image: <filename>" label. Do not skip an image even if it has no fasteners 
 boxes list instead. Do not invent an entry for a filename that wasn't shown to you."""
 
 
-def call_gemini_batch(
-    client: genai.Client, image_paths: List[Path], model: str, retries: int, backoff: float,
-    concept_hints: Optional[Dict[str, List[List[List[int]]]]] = None,
-    concept_overlay_dir: Optional[Path] = None,
-) -> Tuple[Dict[str, BoltAnnotation], int]:
-    """One API call annotates ALL of image_paths together. Returns ({filename: BoltAnnotation},
-    total_tokens_used - 0 if the call never went through). Any filename the model doesn't return
-    an entry for is simply absent from the dict; the caller treats that as a failure for that
-    image (same as the old per-image None-return convention, just resolved per-file afterward
-    instead of per-call).
+def _build_batch_contents(
+    client: genai.Client, image_paths: List[Path],
+    concept_hints: Optional[Dict[str, List[List[List[int]]]]],
+    concept_overlay_dir: Optional[Path],
+) -> Tuple[list, List[str], float, float, int]:
+    """Uploads every image (and, where hints exist, its overlay) for one batch via the Gemini File
+    API and builds the `contents` list that references them - factored out of call_gemini_batch so
+    the same upload+build logic isn't duplicated anywhere it's needed again. Returns (contents,
+    uploaded_file_names, original_mb, overlay_mb, overlay_count). Does NOT delete the uploaded
+    files - that's the caller's responsibility (call_gemini_batch does it in a finally: block once
+    it's done with `contents`).
 
     concept_hints: {filename: [polygon, ...]} read from cache/sam_regions_concept/, or None if no
     cache file existed for ANY pending image in this batch (treated as that source being disabled
@@ -559,11 +653,34 @@ def call_gemini_batch(
     each number as something to draw a box around, rather than judging the highlighted region on
     its own visual merits. Falls back to sending the raw polygon list as text (still unnumbered)
     only if the overlay file doesn't exist for some reason (cache present but QC image missing) -
-    see SYSTEM_PROMPT's "Candidate regions" rule for how this is described to the model."""
+    see SYSTEM_PROMPT's "Candidate regions" rule for how this is described to the model.
+
+    IMAGES ARE UPLOADED VIA THE FILE API (client.files.upload), not sent inline as raw bytes - each
+    image/overlay is uploaded ONCE, then referenced by URI (types.Part.from_uri) so the caller can
+    reuse the SAME contents for both a pre-flight count_tokens() precheck AND the real
+    generate_content() call without the same bytes crossing the network twice."""
     contents: list = []
-    for p in image_paths:
+    original_bytes_total = 0
+    overlay_bytes_total = 0
+    overlay_count = 0
+    uploaded_file_names: List[str] = []
+    total = len(image_paths)
+    for i, p in enumerate(image_paths, start=1):
+        # The only per-image signal without this is the google-genai SDK's own raw httpx request
+        # logging (bare "POST .../upload/v1beta/files ... 200 OK" lines, no filename/index/total) -
+        # real user confusion this session ("it doesn't show any progress thing due x/300
+        # womsthing") on a chunk that can be 40+ images, each a slow (~1-5s) resumable upload.
+        log.info("[%d/%d] uploading %s", i, total, p.name)
         contents.append(f"Image: {p.name}")
-        contents.append(types.Part.from_bytes(data=p.read_bytes(), mime_type=_mime_for(p)))
+        original_bytes_total += p.stat().st_size
+        uploaded = client.files.upload(
+            file=p,
+            config=types.UploadFileConfig(
+                display_name=f"{UPLOADED_FILE_DISPLAY_NAME_PREFIX}{p.name}"
+            ),
+        )
+        uploaded_file_names.append(uploaded.name)
+        contents.append(types.Part.from_uri(file_uri=uploaded.uri, mime_type=uploaded.mime_type))
         if concept_hints is not None:
             polygons = concept_hints.get(p.name, [])
             if polygons:
@@ -581,8 +698,17 @@ def call_gemini_batch(
                         f"one per highlighted region, in the order the regions appear reading the "
                         f"image left-to-right then top-to-bottom."
                     )
-                    contents.append(types.Part.from_bytes(
-                        data=overlay_path.read_bytes(), mime_type=_mime_for(overlay_path)
+                    overlay_bytes_total += overlay_path.stat().st_size
+                    overlay_count += 1
+                    uploaded_overlay = client.files.upload(
+                        file=overlay_path,
+                        config=types.UploadFileConfig(
+                            display_name=f"{UPLOADED_FILE_DISPLAY_NAME_PREFIX}overlay-{p.name}"
+                        ),
+                    )
+                    uploaded_file_names.append(uploaded_overlay.name)
+                    contents.append(types.Part.from_uri(
+                        file_uri=uploaded_overlay.uri, mime_type=uploaded_overlay.mime_type
                     ))
                 else:
                     # Fallback for the rare/abnormal case where a candidate cache exists but its
@@ -602,50 +728,173 @@ def call_gemini_batch(
                 contents.append(f"No concept-targeted candidate regions were found for {p.name} - "
                                  f"return an empty concept_candidate_dispositions list for it.")
     contents.append(BATCH_USER_PROMPT)
+    original_mb = original_bytes_total / (1024 * 1024)
+    overlay_mb = overlay_bytes_total / (1024 * 1024)
+    return contents, uploaded_file_names, original_mb, overlay_mb, overlay_count
 
-    config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT,
-        response_mime_type="application/json",
-        response_schema=BatchAnnotation,
-        temperature=0,  # real regression observed this session with the default (non-zero)
-        # temperature: re-running the SAME image at the SAME PROMPT_VERSION produced a different,
-        # rule-violating result (two adjacent bolts on one clamp bracket merged into a single box,
-        # instead of one box per fastener) - with no temperature pinned, a before/after prompt
-        # comparison can't tell a real prompt regression apart from ordinary sampling noise. Pinning
-        # to 0 for a structured-extraction task like this is standard practice and makes future
-        # prompt iteration actually attributable.
+
+def call_gemini_batch(
+    client: genai.Client, image_paths: List[Path], model: str, retries: int, backoff: float,
+    concept_hints: Optional[Dict[str, List[List[List[int]]]]] = None,
+    concept_overlay_dir: Optional[Path] = None,
+    temperature: Optional[float] = 0,
+) -> Tuple[Dict[str, BoltAnnotation], int, float, float]:
+    """One API call annotates ALL of image_paths together. Returns ({filename: BoltAnnotation},
+    total_tokens_used, original_images_mb, overlay_images_mb) - tokens/mb are all 0 if the call
+    never went through. original_images_mb/overlay_images_mb are the actual payload size of what
+    was SENT this call, always computed regardless of whether the call succeeds, so a failed call
+    still reports what it tried to send. Any filename the model doesn't return an entry for is
+    simply absent from the dict; the caller treats that as a failure for that
+    image (same as the old per-image None-return convention, just resolved per-file afterward
+    instead of per-call).
+
+    temperature: 0 (the default) pins deterministic output - required for reproducible prompt A/B
+    testing (a real regression this session: re-running the SAME image at temperature=0 gave the
+    SAME result both times, proving determinism; the default non-zero temperature did NOT). Pass
+    None for multi-pass/voting mode instead - N deterministic passes would trivially agree 5/5
+    every time, which defeats the entire point of majority voting; None omits `temperature=` from
+    GenerateContentConfig entirely, letting the API's own real default (genuine sampling variance)
+    produce passes that can actually disagree, which is what voting needs.
+
+    See _build_batch_contents (called at the top of this function) for the concept_hints/
+    concept_overlay_dir/File-API-upload documentation - unchanged, just factored out."""
+    contents, uploaded_file_names, original_mb, overlay_mb, overlay_count = _build_batch_contents(
+        client, image_paths, concept_hints, concept_overlay_dir
     )
+    try:
+        total_mb = original_mb + overlay_mb
+        total_image_parts = len(image_paths) + overlay_count
+        log.info("  batch payload: %d original image(s) = %.2f MB, %d overlay image(s) = %.2f MB, "
+                  "%.2f MB total (%.1f%% of Google's documented %.0f MB inline-payload cap; "
+                  "%d image part(s) total, %.1f%% of the %d images/request cap)",
+                  len(image_paths), original_mb, overlay_count, overlay_mb, total_mb,
+                  total_mb / GOOGLE_MAX_PAYLOAD_MB * 100, GOOGLE_MAX_PAYLOAD_MB,
+                  total_image_parts, total_image_parts / GOOGLE_MAX_IMAGES_PER_REQUEST * 100,
+                  GOOGLE_MAX_IMAGES_PER_REQUEST)
 
-    last_err = None
-    for attempt in range(1, retries + 1):
+        # PRE-FLIGHT real token count, via count_tokens() - NOT an estimate. Uses the SAME uploaded
+        # file references already in `contents` (no re-upload). system_instruction can't be passed
+        # to count_tokens on the Gemini Developer API (real error hit this session: "system_instruction
+        # parameter is only supported in Gemini Enterprise Agent Platform mode") - worked around by
+        # counting SYSTEM_PROMPT as plain content on its own and adding the two counts together.
+        # Purely informational (explicit instruction: no auto-blocking on this number) -
+        # generate_content() below is always still called regardless of what this says.
+        input_cap = MODEL_MAX_INPUT_TOKENS.get(model, FALLBACK_MAX_INPUT_TOKENS)
+        is_confirmed_cap = model in MODEL_MAX_INPUT_TOKENS
+        system_prompt_tokens = client.models.count_tokens(model=model, contents=SYSTEM_PROMPT).total_tokens
+        content_tokens = client.models.count_tokens(model=model, contents=contents).total_tokens
+        precomputed_total = system_prompt_tokens + content_tokens
+        log.info("  batch PRE-FLIGHT token count (real, via count_tokens, before sending): "
+                  "content=%s + system_prompt=%s = %s tokens (%.1f%% of the %s%s input-token cap)",
+                  content_tokens, system_prompt_tokens, precomputed_total,
+                  precomputed_total / input_cap * 100, f"{input_cap:,}",
+                  "" if is_confirmed_cap else " fallback, unconfirmed for this model")
+
+        # temperature=0 (single-pass default): real regression observed this session with the
+        # default (non-zero) temperature - re-running the SAME image at the SAME PROMPT_VERSION
+        # produced a different, rule-violating result (two adjacent bolts on one clamp bracket
+        # merged into a single box, instead of one box per fastener); with no temperature pinned, a
+        # before/after prompt comparison can't tell a real prompt regression apart from ordinary
+        # sampling noise. Pinning to 0 makes future single-pass prompt iteration attributable.
+        # temperature=None (multi-pass/voting mode): the caller passes None specifically so this
+        # omits `temperature=` entirely, letting the API's real default (genuine sampling variance)
+        # produce passes that can actually disagree - see call_gemini_batch's docstring.
+        config_kwargs = dict(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=BatchAnnotation,
+        )
+        if temperature is not None:
+            config_kwargs["temperature"] = temperature
+        config = types.GenerateContentConfig(**config_kwargs)
+
+        last_err = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = client.models.generate_content(model=model, contents=contents, config=config)
+                usage = getattr(response, "usage_metadata", None)
+                tokens = getattr(usage, "total_token_count", 0) or 0
+                if response.parsed is not None:
+                    if usage is not None:
+                        prompt_tok = getattr(usage, "prompt_token_count", 0) or 0
+                        output_tok = getattr(usage, "candidates_token_count", 0) or 0
+                        output_cap = MODEL_MAX_OUTPUT_TOKENS.get(model, 65_536)
+                        log.info("  batch tokens (real, post-response): prompt=%s (%.1f%% of the "
+                                  "%s%s input-token cap) output=%s (%.1f%% of the %s output-token "
+                                  "cap) total=%s",
+                                  prompt_tok, prompt_tok / input_cap * 100, f"{input_cap:,}",
+                                  "" if is_confirmed_cap else " fallback",
+                                  output_tok, output_tok / output_cap * 100, f"{output_cap:,}", tokens)
+                    by_file: Dict[str, BoltAnnotation] = {}
+                    for img in response.parsed.images:
+                        if img.file in by_file:
+                            log.warning("  batch response had a duplicate entry for %s; keeping the "
+                                        "first one", img.file)
+                            continue
+                        by_file[img.file] = BoltAnnotation(
+                            boxes=img.boxes,
+                            concept_candidate_dispositions=img.concept_candidate_dispositions,
+                        )
+                    return by_file, tokens, original_mb, overlay_mb
+                last_err = f"response.parsed was None; raw text: {response.text[:500]!r}"
+                # Log IMMEDIATELY, not just once at the very end - previously last_err was only ever
+                # surfaced after ALL retries were exhausted, so a run stuck mid-retry gave no visibility
+                # into WHY it was failing until it was too late to act on.
+                log.error("Batch call attempt %d/%d FAILED for %d image(s): %s",
+                          attempt, retries, len(image_paths), last_err)
+            except Exception as e:  # noqa: BLE001 - deliberately broad, this is a best-effort batch job
+                # Extract EVERY field google-genai actually gives us on an API error (ClientError/
+                # ServerError, both subclasses of APIError - google/genai/errors.py) - the HTTP code,
+                # Google's own status string, Google's own message, AND the full raw error details dict
+                # (which for a 400 typically names the exact violated constraint, e.g. payload/size
+                # limits) - not just str(e)/repr(e), which collapse all of that into one opaque line.
+                if isinstance(e, genai_errors.APIError):
+                    last_err = (f"{type(e).__name__}: HTTP code={e.code} status={e.status!r} "
+                                f"message={e.message!r} details={e.details!r}")
+                else:
+                    last_err = f"{type(e).__name__}: {e}"
+                # exc_info=True (only valid while still inside this except block) attaches the FULL
+                # traceback to this same log record, so both the structured API-error fields above AND
+                # the raw Python stack trace land together in run_log.txt for this exact attempt.
+                log.error("Batch call attempt %d/%d FAILED for %d image(s): %s",
+                          attempt, retries, len(image_paths), last_err, exc_info=True)
+            if attempt < retries:
+                time.sleep(backoff * attempt)
+        log.error("Batch call FAILED for %d image(s) after %d attempts: %s",
+                  len(image_paths), retries, last_err)
+        return {}, 0, original_mb, overlay_mb
+    finally:
+        # Clean up every uploaded file regardless of success/failure above - they'd auto-expire in
+        # 48h anyway, so a failed delete is logged but never raised (not worth failing the whole
+        # batch result over housekeeping).
+        cleanup_total = len(uploaded_file_names)
+        for i, name in enumerate(uploaded_file_names, start=1):
+            log.info("  [%d/%d] deleting uploaded file %s", i, cleanup_total, name)
+            try:
+                client.files.delete(name=name)
+            except Exception as e:  # noqa: BLE001 - cleanup best-effort, never masks the real result
+                log.warning("  failed to delete uploaded file %s (will auto-expire in 48h): %s",
+                            name, e)
+        # SWEEP for anything the by-name delete above couldn't catch - specifically an upload()
+        # call interrupted (e.g. Ctrl+C) before its return value could be appended to
+        # uploaded_file_names locally. The file object is created server-side (with our
+        # display_name) BEFORE the byte upload begins (confirmed via the SDK source), so it's
+        # findable here by display_name prefix even when never locally tracked. Also incidentally
+        # sweeps up any leak from a past crashed run. Cheap (files.list, not a generation call) -
+        # runs every batch, not just on interrupt, since that's the simplest correct behavior.
         try:
-            response = client.models.generate_content(model=model, contents=contents, config=config)
-            usage = getattr(response, "usage_metadata", None)
-            tokens = getattr(usage, "total_token_count", 0) or 0
-            if response.parsed is not None:
-                if usage is not None:
-                    log.info("  batch tokens: prompt=%s output=%s total=%s",
-                              getattr(usage, "prompt_token_count", "?"),
-                              getattr(usage, "candidates_token_count", "?"), tokens)
-                by_file: Dict[str, BoltAnnotation] = {}
-                for img in response.parsed.images:
-                    if img.file in by_file:
-                        log.warning("  batch response had a duplicate entry for %s; keeping the "
-                                    "first one", img.file)
-                        continue
-                    by_file[img.file] = BoltAnnotation(
-                        boxes=img.boxes,
-                        concept_candidate_dispositions=img.concept_candidate_dispositions,
-                    )
-                return by_file, tokens
-            last_err = f"response.parsed was None; raw text: {response.text[:500]!r}"
-        except Exception as e:  # noqa: BLE001 - deliberately broad, this is a best-effort batch job
-            last_err = repr(e)
-        if attempt < retries:
-            time.sleep(backoff * attempt)
-    log.error("Batch call FAILED for %d image(s) after %d attempts: %s",
-              len(image_paths), retries, last_err)
-    return {}, 0
+            for f in client.files.list():
+                if (f.display_name and f.display_name.startswith(UPLOADED_FILE_DISPLAY_NAME_PREFIX)
+                        and f.name not in uploaded_file_names):
+                    try:
+                        client.files.delete(name=f.name)
+                        log.warning("  swept up an untracked uploaded file %s (display_name=%s) - "
+                                    "likely orphaned by an interrupt during its own upload() call",
+                                    f.name, f.display_name)
+                    except Exception as e:  # noqa: BLE001 - sweep cleanup is best-effort too
+                        log.warning("  failed to delete swept-up file %s: %s", f.name, e)
+        except Exception as e:  # noqa: BLE001 - the sweep itself is best-effort, never fatal
+            log.warning("  file cleanup sweep failed (any leftover files will auto-expire in 48h): %s", e)
 
 
 def _load_hints_for(
@@ -670,74 +919,238 @@ def _load_hints_for(
     return hints if found_any_cache else None
 
 
+def chunk_images_for_budget(pending: List[Path], model: str) -> List[List[Path]]:
+    """Splits `pending` into sub-batches that should each stay under the real input-token cap for
+    `model`, using the ESTIMATED_TOKENS_PER_IMAGE/ESTIMATED_FIXED_TOKENS_PER_CALL regression (no
+    network calls - this only needs to plan boundaries, not measure exactly; call_gemini_batch
+    still does a REAL count_tokens() check per actual chunk before ever sending). Explicit
+    instruction this session: the caller (main()) should never have to hand-pick --limit to avoid
+    the token cap - "if i say 300 you must handle internally" - this is that internal handling.
+
+    Greedy: walk `pending` in order, add images to the current chunk while
+    ESTIMATED_FIXED_TOKENS_PER_CALL + running_count * ESTIMATED_TOKENS_PER_IMAGE stays under
+    input_cap * CHUNK_SAFETY_MARGIN; start a new chunk once the next image would exceed it. A
+    single image is always its own chunk-of-one even if that alone estimates over budget (the
+    estimate is approximate; a real oversized single image is still attempted and let the real
+    count_tokens()/generate_content() calls be the actual judge, same as any other real failure)."""
+    input_cap = MODEL_MAX_INPUT_TOKENS.get(model, FALLBACK_MAX_INPUT_TOKENS)
+    budget = input_cap * CHUNK_SAFETY_MARGIN
+    chunks: List[List[Path]] = []
+    current: List[Path] = []
+    for img_path in pending:
+        projected = ESTIMATED_FIXED_TOKENS_PER_CALL + (len(current) + 1) * ESTIMATED_TOKENS_PER_IMAGE
+        if current and projected > budget:
+            chunks.append(current)
+            current = []
+        current.append(img_path)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def run_annotation_pass(
+    client: genai.Client, images: List[Path], model: str, retries: int, backoff: float,
+    skip_region_hints: bool, raw_dir: Path, gemini_raw_dir: Path,
+    sam_regions_concept_cache_dir: Path, sam_regions_concept_overlay_dir: Path,
+    temperature: Optional[float], pass_label: str,
+) -> Tuple[int, int, List[str], int, float, float]:
+    """Runs ONE full annotation pass over `images`: cache resolution -> hint loading -> chunked API
+    calls (chunk_images_for_budget - internal auto-chunking, the caller never needs to hand-pick a
+    size that fits under the token cap) -> per-image JSON write -> QC visualization. Used both for
+    the normal single-pass run (raw_dir=cache/raw_gemini, temperature=0) and for each of N
+    independent multi-pass runs (raw_dir=cache/raw_gemini_pass{p}, temperature=None - see
+    call_gemini_batch's docstring for why). `pass_label` is only for log-line prefixing (e.g.
+    "pass 3/5"), does not affect behavior. Returns (done, cached, failures, tokens, original_mb,
+    overlay_mb)."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    gemini_raw_dir.mkdir(parents=True, exist_ok=True)
+
+    failures: List[str] = []
+    done, cached, total_tokens = 0, 0, 0
+    total_original_mb, total_overlay_mb = 0.0, 0.0
+
+    # --- resolve cache status for every image up front. Images that are already usable
+    # (current-model-and-taxonomy cache hit) get their result immediately. Everything else goes
+    # into `pending`, chunked and sent to the API below.
+    results: Dict[Path, BoltAnnotation] = {}
+    pending: List[Path] = []
+
+    for img_path in images:
+        raw_path = raw_dir / f"{img_path.stem}.json"
+        if raw_path.exists():
+            cached_data = json.loads(raw_path.read_text(encoding="utf-8"))
+            cached_model = cached_data.get("model", "unknown")
+            cached_version = cached_data.get("prompt_version", "unknown")
+            is_current = cached_model == model and cached_version == PROMPT_VERSION
+
+            if is_current:
+                results[img_path] = BoltAnnotation(boxes=cached_data["boxes"])
+                cached += 1
+                log.info("%s [%s] - SKIP: already annotated by current model+taxonomy (%s, v%d)",
+                          img_path.name, pass_label, model, PROMPT_VERSION)
+                continue
+            else:
+                # Stale cache (different model or PROMPT_VERSION) is ALWAYS re-annotated - no flag
+                # gating this (removed by explicit instruction: the old --reannotate-stale flag was
+                # judged unnecessary complexity, since keeping stale annotations around silently
+                # defeats the point of bumping PROMPT_VERSION in the first place).
+                log.info("%s [%s] - RE-ANNOTATE: was model=%s taxonomy=v%s, redoing with model=%s "
+                          "taxonomy=v%d (stale cache is always redone)",
+                          img_path.name, pass_label, cached_model, cached_version, model, PROMPT_VERSION)
+        pending.append(img_path)
+
+    # --- Build hints for `pending` from the upstream SAM3 concept-search cache. See
+    # _load_hints_for's docstring for the None-vs-empty-dict-vs-per-image-missing semantics.
+    concept_hints: Optional[Dict[str, List[List[List[int]]]]] = None
+    if pending and not skip_region_hints:
+        concept_hints = _load_hints_for(pending, sam_regions_concept_cache_dir,
+                                         "SAM concept-proposal (run 03_propose_regions_concept.py)")
+        if concept_hints is None:
+            log.warning("[%s] No SAM concept-proposal cache found for ANY pending image - did you "
+                        "run 03_propose_regions_concept.py first?", pass_label)
+    elif pending:
+        log.info("[%s] --skip-region-hints set - sending %d image(s) to %s with no segmentation "
+                  "hints", pass_label, len(pending), model)
+
+    # --- Chunked API calls: chunk_images_for_budget splits `pending` internally so the caller
+    # never has to hand-pick a --limit that fits under the token cap ("if i say 300 you must
+    # handle internally" - explicit instruction). Each chunk still gets its own REAL count_tokens()
+    # pre-flight check inside call_gemini_batch as the authoritative confirmation.
+    if pending:
+        chunks = chunk_images_for_budget(pending, model)
+        log.info("[%s] ANNOTATE: %d image(s) split into %d chunk(s) to stay under the real "
+                  "input-token cap (sizes: %s)", pass_label, len(pending), len(chunks),
+                  ", ".join(str(len(c)) for c in chunks))
+        for chunk_i, chunk in enumerate(chunks, 1):
+            log.info("[%s] chunk %d/%d (%d image(s)): %s", pass_label, chunk_i, len(chunks),
+                      len(chunk), ", ".join(p.name for p in chunk))
+            by_file, tokens, original_mb, overlay_mb = call_gemini_batch(
+                client, chunk, model, retries, backoff, concept_hints,
+                sam_regions_concept_overlay_dir, temperature,
+            )
+            total_tokens += tokens
+            total_original_mb += original_mb
+            total_overlay_mb += overlay_mb
+
+            for img_path in chunk:
+                ann = by_file.get(img_path.name)
+                if ann is None:
+                    log.error("[%s] FAILED %s: not present in batch response",
+                              pass_label, img_path.name)
+                    failures.append(img_path.name)
+                    continue
+                raw_path = raw_dir / f"{img_path.stem}.json"
+                raw_path.write_text(
+                    json.dumps(
+                        {"model": model, "prompt_version": PROMPT_VERSION,
+                         "boxes": [b.model_dump() for b in ann.boxes],
+                         "concept_candidate_dispositions": [
+                             d.model_dump() for d in ann.concept_candidate_dispositions
+                         ]},
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                log.info("[%s] OK: %s -> %d box(es)", pass_label, img_path.name, len(ann.boxes))
+                # No index field on the model's response by design (see ConceptCandidateDisposition's
+                # docstring) - enumerate() here is OUR OWN positional index for the log line only,
+                # never something the model referenced or was asked to produce.
+                discarded = [(i, d) for i, d in enumerate(ann.concept_candidate_dispositions) if not d.accepted]
+                for i, d in discarded:
+                    log.info("  [%s] DISCARDED region %d for %s: %s", pass_label, i, img_path.name, d.reason)
+                if discarded:
+                    log.info("  [%s] %s: %d/%d region(s) discarded (see reasons above)",
+                              pass_label, img_path.name, len(discarded),
+                              len(ann.concept_candidate_dispositions))
+                results[img_path] = ann
+                done += 1
+    else:
+        log.info("[%s] Nothing to annotate - all images already have usable cached results.",
+                  pass_label)
+
+    # --- Regenerate gemini_raw_dir for every image that has a result (cheap, no API calls,
+    # applies uniformly to fresh/cached results) - Gemini's boxes exactly as returned (structurally
+    # valid ones only), before 05_tighten_boxes.py touches geometry at all.
+    for img_path in images:
+        result = results.get(img_path)
+        if result is None:
+            continue
+        result = filter_valid_boxes(result, img_path.name)
+        draw_visualization(img_path, result, gemini_raw_dir / img_path.name)
+
+    return done, cached, failures, total_tokens, total_original_mb, total_overlay_mb
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--src", type=Path, default=Path(__file__).parent / "npu_bolt")
-    parser.add_argument("--out", type=Path, default=Path(__file__).parent / "annotations")
+    parser.add_argument("--src", type=Path, default=Path(__file__).parent / "circe_datasets" / "npu_bolt" / "working_images")
+    parser.add_argument("--out", type=Path, default=Path(__file__).parent / "circe_datasets" / "npu_bolt")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL,
                          help=f"Gemini model ID to call (default {DEFAULT_MODEL!r}). Switching "
                               "models never needs a code edit - just pass a different --model. "
-                              "Images cached under a different model are handled exactly like a "
-                              "PROMPT_VERSION change: kept as-is by default, see --reannotate-stale.")
+                              "Images cached under a different model or PROMPT_VERSION are always "
+                              "automatically re-annotated (real API cost) - no flag needed.")
     parser.add_argument("--skip-region-hints", action="store_true",
                          help="Ignore cache/sam_regions_concept/ even if that stage was run - send "
                               "images with no candidate hints at all. Use this to A/B-test hint "
                               "impact without deleting that cache.")
     parser.add_argument("--limit", type=int, default=None,
-                         help="Only consider the first N images from --src this run. This is the "
-                              "ONLY thing that controls batch size - every image that still needs "
-                              "annotating after --limit and the cache are applied goes into ONE "
-                              "Gemini API call. Pick N yourself based on what you've confirmed "
-                              "works against your own account (payload size, TPM); re-run with a "
-                              "different --limit to cover the rest - already-annotated images are "
-                              "never re-sent, so repeat runs just pick up where the last stopped.")
+                         help="Only consider the first N images from --src this run. Batch SIZE "
+                              "within that is now handled internally (see --passes/chunking below) "
+                              "- --limit only caps the total image COUNT considered.")
     parser.add_argument("--retries", type=int, default=3,
-                         help="Retries apply to the WHOLE run's single API call, not per-image - "
-                              "if it fails outright it's retried (same request) up to this many "
-                              "times before the whole batch is treated as failed. This does not "
-                              "make extra calls to cover partial misses - it only re-sends an "
-                              "already-failed request.")
+                         help="Retries apply to a WHOLE chunk's API call, not per-image - if it "
+                              "fails outright it's retried (same request) up to this many times "
+                              "before that chunk is treated as failed. This does not make extra "
+                              "calls to cover partial misses - it only re-sends an already-failed "
+                              "request.")
     parser.add_argument("--backoff", type=float, default=3.0, help="Base seconds for retry backoff")
-    parser.add_argument("--reannotate-stale", action="store_true",
-                         help="Re-call the API (costs new calls) for images already annotated under "
-                              "a DIFFERENT model or class taxonomy (MODEL/PROMPT_VERSION) than the "
-                              "current ones. Without this flag, such images are left as-is (old "
-                              "annotation kept) and only logged as a warning - re-annotating never "
-                              "happens silently.")
+    parser.add_argument("--passes", type=int, default=1,
+                         help="Run this many INDEPENDENT annotation passes over the same image set "
+                              "instead of one (explicit instruction: for majority-vote consensus - "
+                              "run 06_vote_consensus.py after this to merge them). --passes 1 "
+                              "(default) is unchanged existing behavior: temperature=0 "
+                              "(deterministic), writes straight to cache/raw_gemini/. --passes > 1 "
+                              "uses the API's real non-zero default temperature instead - N "
+                              "deterministic passes would trivially agree 5/5 every time, which "
+                              "defeats majority voting entirely - and each pass writes to its OWN "
+                              "cache/raw_gemini_pass{N}/ + qc/gemini_raw_pass{N}/ (never touches "
+                              "cache/raw_gemini/ directly in this mode - that's "
+                              "06_vote_consensus.py's job, once all passes are done). Every pass's "
+                              "raw output is kept on disk for manual QC, not just the consensus.")
     parser.add_argument("--clean", action="store_true",
-                         help="Wipe qc/gemini_raw/ before running, then regenerate it from "
-                              "cache/raw_gemini/ - FREE, no API calls, since the expensive part "
-                              "(the cache) is kept.")
-    parser.add_argument("--wipe-cache", action="store_true",
-                         help="DANGER: also delete cache/raw_gemini/ (the Gemini annotation "
-                              "cache), forcing EVERY image to be re-sent to the API on this run - "
-                              "real cost, not just a relabel. Requires --clean to also be set, as "
-                              "a deliberate extra step so this can't be triggered by accident.")
+                         help="DANGER: a full clean run. With --passes 1 (default): deletes "
+                              "qc/gemini_raw/, failures.txt, AND cache/raw_gemini/ before running. "
+                              "With --passes > 1: deletes failures.txt AND every "
+                              "cache/raw_gemini_pass*/ + qc/gemini_raw_pass*/ folder found on disk "
+                              "(glob-matched - also cleans up leftovers from a run made with a "
+                              "DIFFERENT --passes count) - does NOT touch cache/raw_gemini/ in this "
+                              "mode, since in multi-pass mode that's 06_vote_consensus.py's output, "
+                              "not this script's.")
     args = parser.parse_args()
-
-    if args.wipe_cache and not args.clean:
-        raise SystemExit("--wipe-cache requires --clean too (deliberately - this is the expensive, "
-                          "re-annotate-everything option, not a casual one).")
 
     src = args.src.resolve()
     out = args.out.resolve()
-    raw_dir = out / "cache" / "raw_gemini"
     sam_regions_concept_cache_dir = out / "cache" / "sam_regions_concept"
     # UNNUMBERED overlay dir (written by 03_propose_regions_concept.py specifically for this stage)
     # - deliberately NOT qc/sam_proposals_concept/ (that copy has index numbers burned on for OUR
     # OWN human QC inspection; sending numbers to Gemini risked biasing it toward treating each
     # number as something to draw a box around - real concern raised this session).
     sam_regions_concept_overlay_dir = out / "qc" / "sam_proposals_concept_for_gemini"
-    gemini_raw_dir = out / "qc" / "gemini_raw"
 
     if args.clean:
-        shutil.rmtree(gemini_raw_dir, ignore_errors=True)
         (out / "failures.txt").unlink(missing_ok=True)
-        if args.wipe_cache:
-            shutil.rmtree(raw_dir, ignore_errors=True)
+        if args.passes == 1:
+            shutil.rmtree(out / "qc" / "gemini_raw", ignore_errors=True)
+            shutil.rmtree(out / "cache" / "raw_gemini", ignore_errors=True)
+        else:
+            for d in (out / "cache").glob("raw_gemini_pass*"):
+                shutil.rmtree(d, ignore_errors=True)
+            for d in (out / "qc").glob("gemini_raw_pass*"):
+                shutil.rmtree(d, ignore_errors=True)
 
-    for d in (raw_dir, gemini_raw_dir):
-        d.mkdir(parents=True, exist_ok=True)
+    (out / "cache").mkdir(parents=True, exist_ok=True)
+    (out / "qc").mkdir(parents=True, exist_ok=True)
 
     # FileHandler flushes every record as it's emitted, so the log survives a crash/Ctrl-C
     # partway through a long batch - unlike accumulate-then-write-once-at-the-end. Appends to the
@@ -754,9 +1167,14 @@ def main() -> None:
     )
     log.info("Run started. Source: %s", src)
     if args.clean:
-        log.info("--clean: wiped qc/gemini_raw/ (regenerated from cache/, free)%s",
-                  " AND cache/raw_gemini/ (--wipe-cache set - full re-annotation ahead)"
-                  if args.wipe_cache else "")
+        if args.passes == 1:
+            log.info("--clean: wiped qc/gemini_raw/, failures.txt, AND cache/raw_gemini/ - full "
+                      "re-annotation ahead for every image in this run.")
+        else:
+            log.info("--clean: wiped every cache/raw_gemini_pass*/ + qc/gemini_raw_pass*/ + "
+                      "failures.txt - full re-annotation ahead for all %d passes this run "
+                      "(cache/raw_gemini/ untouched - that's 06_vote_consensus.py's output).",
+                      args.passes)
 
     client = genai.Client()
 
@@ -765,128 +1183,84 @@ def main() -> None:
         images = images[: args.limit]
     log.info("Images found: %d", len(images))
 
-    failures: List[str] = []
-    done, cached, stale_kept, total_tokens = 0, 0, 0, 0
+    # Cost/RPD visibility (informational only, no auto-blocking - explicit earlier instruction
+    # against fail-fast/pre-flight blocking): an upper-bound estimate BEFORE the per-pass cache is
+    # even resolved (a real run may end up cheaper once already-annotated images are skipped), so
+    # the real scale of a "300 images x 5 passes" run is visible up front, not discovered mid-run.
+    est_chunks_per_pass = len(chunk_images_for_budget(images, args.model)) if images else 0
+    est_total_calls = est_chunks_per_pass * args.passes
+    log.info("Cost estimate (upper bound, before cache is applied): up to %d chunk(s)/pass x %d "
+              "pass(es) = up to %d generate_content call(s) this run. Check your account's real "
+              "RPD for %s at https://aistudio.google.com/rate-limit?timeRange=last-28-days.",
+              est_chunks_per_pass, args.passes, est_total_calls, args.model)
 
-    # --- Pass 1: resolve cache status for every image up front. Images that are already usable
-    # (current-model-and-taxonomy cache hit, or a stale cache we're keeping as-is) get their
-    # result immediately. Everything else goes into `pending`, sent in ONE batch API call below.
-    results: Dict[Path, BoltAnnotation] = {}
-    pending: List[Path] = []
-
-    for img_path in images:
-        raw_path = raw_dir / f"{img_path.stem}.json"
-        if raw_path.exists():
-            cached_data = json.loads(raw_path.read_text(encoding="utf-8"))
-            cached_model = cached_data.get("model", "unknown")
-            cached_version = cached_data.get("prompt_version", "unknown")
-            is_current = cached_model == args.model and cached_version == PROMPT_VERSION
-
-            if is_current:
-                results[img_path] = BoltAnnotation(boxes=cached_data["boxes"])
-                cached += 1
-                log.info("%s - SKIP: already annotated by current model+taxonomy (%s, v%d)",
-                          img_path.name, args.model, PROMPT_VERSION)
-                continue
-            elif not args.reannotate_stale:
-                results[img_path] = BoltAnnotation(
-                    boxes=migrate_boxes(cached_data["boxes"], img_path.name)
-                )
-                stale_kept += 1
-                log.warning("%s - SKIP: cached under model=%s taxonomy=v%s (current is model=%s "
-                            "taxonomy=v%d); keeping the old annotation as-is. Pass "
-                            "--reannotate-stale to redo it.",
-                            img_path.name, cached_model, cached_version, args.model, PROMPT_VERSION)
-                continue
-            else:
-                log.info("%s - RE-ANNOTATE: was model=%s taxonomy=v%s, redoing with model=%s "
-                          "taxonomy=v%d (--reannotate-stale set)",
-                          img_path.name, cached_model, cached_version, args.model, PROMPT_VERSION)
-        pending.append(img_path)
-
-    # --- Build hints for `pending` from the upstream SAM3 concept-search cache. See
-    # _load_hints_for's docstring for the None-vs-empty-dict-vs-per-image-missing semantics.
-    concept_hints: Optional[Dict[str, List[List[List[int]]]]] = None
-    if pending and not args.skip_region_hints:
-        concept_hints = _load_hints_for(pending, sam_regions_concept_cache_dir,
-                                         "SAM concept-proposal (run 03_propose_regions_concept.py)")
-        if concept_hints is None:
-            log.warning("No SAM concept-proposal cache found for ANY pending image - did you run "
-                        "03_propose_regions_concept.py first?")
-    elif pending:
-        log.info("--skip-region-hints set - sending %d image(s) to %s with no segmentation hints",
-                  len(pending), args.model)
-
-    # --- Pass 2: exactly one API call covering every pending image. No chunking, no automatic
-    # retry-at-smaller-size on partial misses - --retries only re-sends this same request if it
-    # fails outright. Batch size is entirely up to --limit; run again with a different --limit
-    # (already-annotated images are skipped for free) if you want to cover more in a second call.
-    if pending:
-        log.info("ANNOTATE (single batch API call covering %d image(s)): %s",
-                  len(pending), ", ".join(p.name for p in pending))
-        by_file, tokens = call_gemini_batch(
-            client, pending, args.model, args.retries, args.backoff, concept_hints,
-            sam_regions_concept_overlay_dir,
+    if args.passes == 1:
+        raw_dir = out / "cache" / "raw_gemini"
+        gemini_raw_dir = out / "qc" / "gemini_raw"
+        done, cached, failures, total_tokens, total_original_mb, total_overlay_mb = run_annotation_pass(
+            client, images, args.model, args.retries, args.backoff, args.skip_region_hints,
+            raw_dir, gemini_raw_dir, sam_regions_concept_cache_dir, sam_regions_concept_overlay_dir,
+            temperature=0, pass_label="single-pass",
         )
-        total_tokens += tokens
+        if failures:
+            (out / "failures.txt").write_text("\n".join(failures), encoding="utf-8")
 
-        for img_path in pending:
-            ann = by_file.get(img_path.name)
-            if ann is None:
-                log.error("FAILED %s: not present in batch response", img_path.name)
-                failures.append(img_path.name)
-                continue
-            raw_path = raw_dir / f"{img_path.stem}.json"
-            raw_path.write_text(
-                json.dumps(
-                    {"model": args.model, "prompt_version": PROMPT_VERSION,
-                     "boxes": [b.model_dump() for b in ann.boxes],
-                     "concept_candidate_dispositions": [
-                         d.model_dump() for d in ann.concept_candidate_dispositions
-                     ]},
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            log.info("OK: %s -> %d box(es)", img_path.name, len(ann.boxes))
-            # No index field on the model's response by design (see ConceptCandidateDisposition's
-            # docstring) - enumerate() here is OUR OWN positional index for the log line only,
-            # never something the model referenced or was asked to produce.
-            discarded = [(i, d) for i, d in enumerate(ann.concept_candidate_dispositions) if not d.accepted]
-            for i, d in discarded:
-                log.info("  DISCARDED region %d for %s: %s", i, img_path.name, d.reason)
-            if discarded:
-                log.info("  %s: %d/%d region(s) discarded (see reasons above)",
-                          img_path.name, len(discarded), len(ann.concept_candidate_dispositions))
-            results[img_path] = ann
-            done += 1
+        total_mb_run = total_original_mb + total_overlay_mb
+        run_input_cap = MODEL_MAX_INPUT_TOKENS.get(args.model, FALLBACK_MAX_INPUT_TOKENS)
+        log.info("Done. %d newly/re-annotated, %d cached (current model+taxonomy), %d failed, "
+                  "%d tokens used this run (%.1f%% of the %s input-token cap%s; real API "
+                  "calls only - cached images cost nothing), %.2f MB original + %.2f MB overlay = "
+                  "%.2f MB images sent this run (%.1f%% of Google's %.0f MB inline-payload cap).",
+                  done, cached, len(failures), total_tokens,
+                  total_tokens / run_input_cap * 100, f"{run_input_cap:,}",
+                  "" if args.model in MODEL_MAX_INPUT_TOKENS else " fallback, unconfirmed for this model",
+                  total_original_mb, total_overlay_mb,
+                  total_mb_run, total_mb_run / GOOGLE_MAX_PAYLOAD_MB * 100, GOOGLE_MAX_PAYLOAD_MB)
+        if failures:
+            log.info("Failures logged to %s", out / "failures.txt")
+        log.info("Raw results cached at %s. Run 05_tighten_boxes.py next to produce dataset/ + final qc/.",
+                  raw_dir)
     else:
-        log.info("Nothing to annotate - all images already have usable cached results.")
+        grand_done, grand_cached, grand_failed, grand_tokens = 0, 0, 0, 0
+        grand_original_mb, grand_overlay_mb = 0.0, 0.0
+        all_failures: List[str] = []
+        for p in range(1, args.passes + 1):
+            pass_label = f"pass {p}/{args.passes}"
+            log.info("=== Starting %s ===", pass_label)
+            raw_dir = out / "cache" / f"raw_gemini_pass{p}"
+            gemini_raw_dir = out / "qc" / f"gemini_raw_pass{p}"
+            done, cached, failures, tokens, original_mb, overlay_mb = run_annotation_pass(
+                client, images, args.model, args.retries, args.backoff, args.skip_region_hints,
+                raw_dir, gemini_raw_dir, sam_regions_concept_cache_dir,
+                sam_regions_concept_overlay_dir, temperature=None, pass_label=pass_label,
+            )
+            grand_done += done
+            grand_cached += cached
+            grand_failed += len(failures)
+            grand_tokens += tokens
+            grand_original_mb += original_mb
+            grand_overlay_mb += overlay_mb
+            all_failures.extend(f"{pass_label}: {name}" for name in failures)
+            log.info("=== %s done: %d newly-annotated, %d cached, %d failed, %d tokens ===",
+                      pass_label, done, cached, len(failures), tokens)
 
-    # --- Pass 3: regenerate qc/gemini_raw/ for every image that has a result (cheap, no API
-    # calls, applies uniformly to fresh/cached/stale-kept results) - Gemini's boxes exactly as
-    # returned (structurally valid ones only), before 05_tighten_boxes.py touches geometry at all.
-    for img_path in images:
-        result = results.get(img_path)
-        if result is None:
-            continue
-        result = filter_valid_boxes(result, img_path.name)
-        draw_visualization(img_path, result, gemini_raw_dir / img_path.name)
+        if all_failures:
+            (out / "failures.txt").write_text("\n".join(all_failures), encoding="utf-8")
 
-    if failures:
-        (out / "failures.txt").write_text("\n".join(failures), encoding="utf-8")
-
-    log.info("Done. %d newly/re-annotated, %d cached (current model+taxonomy), %d cached (stale, "
-              "kept as-is), %d failed, %d tokens used this run (real API calls only - "
-              "cached/skipped images cost nothing).",
-              done, cached, stale_kept, len(failures), total_tokens)
-    if stale_kept:
-        log.info("%d image(s) still hold annotations from an older model or class taxonomy - "
-                  "re-run with --reannotate-stale if you want them redone.", stale_kept)
-    if failures:
-        log.info("Failures logged to %s", out / "failures.txt")
-    log.info("Raw results cached at %s. Run 05_tighten_boxes.py next to produce dataset/ + final qc/.",
-              raw_dir)
+        total_mb_run = grand_original_mb + grand_overlay_mb
+        run_input_cap = MODEL_MAX_INPUT_TOKENS.get(args.model, FALLBACK_MAX_INPUT_TOKENS)
+        log.info("Done. %d pass(es) complete. %d newly/re-annotated, %d cached, %d failed "
+                  "(summed across all passes), %d tokens used this run (real API calls only), "
+                  "%.2f MB original + %.2f MB overlay = %.2f MB images sent this run (%.1f%% of "
+                  "Google's %.0f MB inline-payload cap, summed across all chunks/passes).",
+                  args.passes, grand_done, grand_cached, grand_failed, grand_tokens,
+                  grand_original_mb, grand_overlay_mb, total_mb_run,
+                  total_mb_run / GOOGLE_MAX_PAYLOAD_MB * 100, GOOGLE_MAX_PAYLOAD_MB)
+        if all_failures:
+            log.info("Failures logged to %s", out / "failures.txt")
+        log.info("Per-pass results cached at %s/cache/raw_gemini_pass{1..%d}/. Run "
+                  "06_vote_consensus.py next to majority-vote them into cache/raw_gemini/, then "
+                  "05_tighten_boxes.py to produce dataset/ + final qc/.", out, args.passes)
 
 
 if __name__ == "__main__":

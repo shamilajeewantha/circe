@@ -1,10 +1,14 @@
 """Shared constants, pydantic models, and helper functions for the dataset_annotation pipeline,
-split across four staged scripts so expensive SAM inference and paid Gemini calls are never
-re-run just to test a downstream stage:
+split across staged scripts so expensive SAM inference and paid Gemini calls are never re-run just
+to test a downstream stage (02_propose_regions_dumb.py/SAM2 is no longer part of the active
+pipeline - see 04's own docstring):
 
-  02_propose_regions_dumb.py    - SAM2 promptless/automatic region-proposal pass (local, free)
   03_propose_regions_concept.py - SAM3 text-prompted concept region-proposal pass (local, free)
-  04_annotate_with_gemini.py    - the one Gemini API call (costs real quota)
+  04_annotate_with_gemini.py    - Gemini annotation, auto-chunked, optionally multi-pass (costs
+                                   real quota - the only stage that does)
+  06_vote_consensus.py          - majority-vote merge of 04's multi-pass output into a single
+                                   consensus annotation (local, free) - only relevant when 04 was
+                                   run with --passes > 1
   05_tighten_boxes.py           - SAM3 box-tightening pass + final dataset/qc output (local, free)
 
 Each stage reads an earlier stage's cache/ output and is independently re-runnable without
@@ -90,6 +94,10 @@ BOX_COLORS = {
     "bolt_defective": (220, 20, 20),
     "bolt_corroded": (150, 90, 20),
 }
+
+# Short form for vote-tally text (draw_consensus_visualization) - "corroded:3 defective:0 ok:1"
+# reads faster than the full class names crammed into one label string.
+CLASS_SHORT = {"bolt_ok": "ok", "bolt_defective": "defective", "bolt_corroded": "corroded"}
 
 # Deliberately outside BOX_COLORS' traffic-light palette (green/red/brown) so proposals read as
 # "not yet classified" at a glance, not a 4th defect class. Two distinct colors so the two SAM
@@ -648,6 +656,61 @@ def draw_visualization(image_path: Path, ann: BoltAnnotation, out_path: Path) ->
         text_pos = (x0 + 4, label_rect[1] + text_h)
         cv2.putText(img, box.label, text_pos, font, font_scale, (0, 0, 0), thickness + 3, cv2.LINE_AA)
         cv2.putText(img, box.label, text_pos, font, font_scale, color, thickness, cv2.LINE_AA)
+
+    cv2.imwrite(str(out_path), img)
+
+
+def draw_consensus_visualization(image_path: Path, clusters_info: List[dict], out_path: Path) -> None:
+    """QC image for 06_vote_consensus.py's multi-pass majority-vote output: draws only the
+    INCLUDED clusters (presence_count >= vote_threshold), using the same box-color convention as
+    draw_visualization (BOX_COLORS, keyed by the winning label), but the label text is the real
+    vote tally instead of just the class name - explicit spec: "this bbox was predicted by gemini
+    4/5 and 3/5 were corroded ... 2/5 bolt ok" -> rendered as e.g.
+    "4/5 detected - corroded:3 defective:0 ok:1", so vote confidence is visible at a glance, not
+    just the final winning class.
+
+    clusters_info: list of dicts, each with box_2d ([ymin,xmin,ymax,xmax]/1000), label (the
+    plurality-vote winner), presence_count (int), num_passes (int), label_votes (dict[str,int]),
+    included (bool) - exactly what 06_vote_consensus.py's vote_boxes_for_image() produces per
+    cluster (see that function's docstring). Clusters with included=False are skipped entirely -
+    they never made the vote-threshold cut, so they're not drawn here (that's a below-threshold
+    exclusion, not a rendering choice)."""
+    img = cv2.imread(str(image_path))
+    height, width = img.shape[:2]
+    line_width = max(4, round(min(width, height) / 250))
+    font_scale = max(0.8, min(width, height) / 1100)
+    thickness = max(2, round(font_scale))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    placed_labels: List[tuple] = []
+    for cluster in clusters_info:
+        if not cluster["included"]:
+            continue
+        ymin, xmin, ymax, xmax = cluster["box_2d"]
+        x0, y0 = round(xmin / 1000.0 * width), round(ymin / 1000.0 * height)
+        x1, y1 = round(xmax / 1000.0 * width), round(ymax / 1000.0 * height)
+        color = BOX_COLORS[cluster["label"]][::-1]  # RGB -> BGR for cv2
+
+        cv2.rectangle(img, (x0, y0), (x1, y1), color, line_width)
+
+        votes_str = " ".join(
+            f"{CLASS_SHORT.get(label, label)}:{count}"
+            for label, count in sorted(cluster["label_votes"].items())
+        )
+        text = f"{cluster['presence_count']}/{cluster['num_passes']} detected - {votes_str}"
+
+        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        label_h = text_h + baseline + 6
+        label_top = max(0, y0 - label_h)
+        label_rect = (x0, label_top, x0 + text_w + 8, label_top + label_h)
+        while any(_rects_overlap(label_rect, other) for other in placed_labels):
+            label_top += label_h + 2
+            label_rect = (x0, label_top, x0 + text_w + 8, label_top + label_h)
+        placed_labels.append(label_rect)
+
+        text_pos = (x0 + 4, label_rect[1] + text_h)
+        cv2.putText(img, text, text_pos, font, font_scale, (0, 0, 0), thickness + 3, cv2.LINE_AA)
+        cv2.putText(img, text, text_pos, font, font_scale, color, thickness, cv2.LINE_AA)
 
     cv2.imwrite(str(out_path), img)
 

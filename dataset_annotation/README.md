@@ -1,6 +1,6 @@
 # dataset_annotation
 
-Re-annotates the NPU-BOLT dataset (`npu_bolt/`) into a clean 3-class YOLO-format dataset using
+Re-annotates the NPU-BOLT dataset (`datasets/npu_bolt/`, read-only) into a clean 3-class YOLO-format dataset using
 Gemini, because the classes NPU-BOLT ships with (bolt head / bolt side / bolt nut / blur bolt)
 are bolt-*localization* categories, not defect states - not usable for a defect-detection robot.
 
@@ -146,31 +146,31 @@ python -c "import torch, cv2, sam3, sam2, pydantic, dotenv, google.genai; \
 
 NPU-BOLT ships 3 image groups by filename prefix: `AUT-*` (204 field photos), `WEB-*` (116
 internet photos), `CAD-*` (17 synthetic CAD renders - not real photographs, must not be annotated
-as if they were). This script moves (not deletes - reversible) `CAD-*` files out to a sibling
-folder `npu_bolt_cad_excluded/`.
+as if they were). `datasets/npu_bolt/` is **read-only** (never written to), so this script COPIES
+the real (`AUT-*`/`WEB-*`) images into a working copy at `circe_datasets/npu_bolt/working_images/`,
+excluding `CAD-*`.
 
 ```bash
 python 01_remove_cad.py
 ```
 
-Already run once as of this writing - `npu_bolt/` currently holds the 320 real (AUT-*/WEB-*)
-images only. Safe to re-run any time; it's a no-op once the CAD files are already moved.
+Idempotent - safe to re-run any time; already-copied files are skipped.
 
-Logs to `cleanup_cad_log.txt`.
+Logs to `circe_datasets/npu_bolt/cleanup_cad_log.txt`.
 
 ### `02_propose_regions_dumb.py` - SAM2 promptless region proposals (stage 1, local/free)
 
 ```bash
 python 02_propose_regions_dumb.py --limit 1     # speed is UNVERIFIED - test one image first
-python 02_propose_regions_dumb.py                # full pass over everything in npu_bolt/
+python 02_propose_regions_dumb.py                # full pass over everything in circe_datasets/npu_bolt/working_images/
 ```
 
 Key flags:
 
 | flag | default | purpose |
 |---|---|---|
-| `--src` | `npu_bolt` | folder of images to process |
-| `--out` | `annotations` | output folder (shared with all stages) |
+| `--src` | `circe_datasets/npu_bolt/working_images` | folder of images to process |
+| `--out` | `circe_datasets/npu_bolt` | output folder (shared with all stages) |
 | `--sam2-model-id` | `facebook/sam2.1-hiera-tiny` | Hugging Face repo ID (not gated, auto-downloads) |
 | `--points-per-side` | 32 | grid density - a real, directly-reachable tuning knob (lower = faster/coarser) |
 | `--limit N` | none | only consider the first N images from `--src` this run |
@@ -190,15 +190,15 @@ passes miss it.
 
 ```bash
 python 03_propose_regions_concept.py --limit 5      # smoke test a handful first
-python 03_propose_regions_concept.py                # full pass over everything in npu_bolt/
+python 03_propose_regions_concept.py                # full pass over everything in circe_datasets/npu_bolt/working_images/
 ```
 
 Key flags:
 
 | flag | default | purpose |
 |---|---|---|
-| `--src` | `npu_bolt` | folder of images to process |
-| `--out` | `annotations` | output folder (shared with all stages) |
+| `--src` | `circe_datasets/npu_bolt/working_images` | folder of images to process |
+| `--out` | `circe_datasets/npu_bolt` | output folder (shared with all stages) |
 | `--concepts` | `bolt,screw,nut,fastener,rivet` | comma-separated text concepts SAM3 searches for |
 | `--sam3-checkpoint` | `sam3.pt` next to the script, if present, else auto-download | override to point elsewhere |
 | `--limit N` | none | only consider the first N images from `--src` this run |
@@ -216,15 +216,15 @@ skipped for free in both proposal stages.
 
 ```bash
 python 04_annotate_with_gemini.py --limit 10   # smoke test first
-python 04_annotate_with_gemini.py              # full run over everything in npu_bolt/
+python 04_annotate_with_gemini.py              # full run over everything in circe_datasets/npu_bolt/working_images/
 ```
 
 Key flags:
 
 | flag | default | purpose |
 |---|---|---|
-| `--src` | `npu_bolt` | folder of images to annotate |
-| `--out` | `annotations` | output folder (shared with all stages) |
+| `--src` | `circe_datasets/npu_bolt/working_images` | folder of images to annotate |
+| `--out` | `circe_datasets/npu_bolt` | output folder (shared with all stages) |
 | `--model` | `gemini-robotics-er-1.6-preview` | Gemini model ID - switch any time, no code edit needed |
 | `--skip-region-hints` | off | ignore both proposal caches even if stages 1-2 were run - send images with no hint text |
 | `--limit N` | none | only consider the first N images from `--src` this run |
@@ -254,8 +254,8 @@ Key flags:
 
 | flag | default | purpose |
 |---|---|---|
-| `--src` | `npu_bolt` | folder of images to process |
-| `--out` | `annotations` | output folder (shared with all stages) |
+| `--src` | `circe_datasets/npu_bolt/working_images` | folder of images to process |
+| `--out` | `circe_datasets/npu_bolt` | output folder (shared with all stages) |
 | `--sam3-checkpoint` | `sam3.pt` next to the script, if present, else auto-download | override to point elsewhere |
 | `--skip-tightening` | off | skip the SAM box-tightening pass; still produces `dataset/`+`qc/visualized/`, just with Gemini's boxes exactly as cached |
 | `--limit N` | none | only consider the first N images from `--src` this run |
@@ -374,7 +374,9 @@ script only wipes the `cache/`/`qc/`/`dataset/` subfolders it owns (see each scr
 above), never another stage's output.
 
 ```
-annotations/
+circe_datasets/npu_bolt/
+  working_images/                       CAD-*-excluded working copy of datasets/npu_bolt/images/
+                                         (built by 01_remove_cad.py; datasets/ itself never modified)
   cache/
     sam_regions_dumb/<stem>.json        (stage 1) SAM2's raw geometric candidates actually sent as
                                          hints - not read back except by stage 3
@@ -385,7 +387,7 @@ annotations/
                                          the API call is batched
   dataset/                              (stage 4)
     data.yaml                           nc: 3, names 0-2, train/val both point at images/
-    images/<stem>.jpg                   copy of the original photo (npu_bolt/ never modified)
+    images/<stem>.jpg                   copy of the original photo (datasets/npu_bolt/ never modified)
     labels/<stem>.txt                   YOLO label: "class_id cx cy w h" normalized 0-1, one line
                                          per box (empty file = valid "no defects found" background)
   qc/
@@ -397,13 +399,13 @@ annotations/
     sam_regions_debug/<stem>.json       (stage 4) same, as numbers
   failures.txt                          (stage 3) images that failed after retries, for manual re-run
   run_log.txt                           full timestamped log, appended to by ALL FOUR stages -
-                                         one interleaved history per `annotations/` output folder
+                                         one interleaved history per `circe_datasets/npu_bolt/` output folder
 ```
 
 `dataset/data.yaml`'s `train:`/`val:` both point at the same `images/` folder on purpose - this is
 one unsplit source. Real train/valid/test splitting happens later, in `model_training/pipeline`
-when this gets merged with the rest of the datasets (point it at `annotations/dataset/` specifically
-- that's the clean YOLO-shape folder, `cache/`/`qc/` aren't part of the dataset).
+when this gets merged with the rest of the datasets (point it at `circe_datasets/npu_bolt/dataset/`
+specifically - that's the clean YOLO-shape folder, `cache/`/`qc/` aren't part of the dataset).
 
 ## Rate limits and real token usage
 
@@ -427,7 +429,7 @@ block above `DEFAULT_MODEL` in `04_annotate_with_gemini.py` for the full list tr
 tested/untested status. That trade means **RPD is the one that matters** on the free tier (only
 20/day) - TPM isn't a practical constraint since it resets every 60 seconds, so an oversized request
 just costs you a wait, not a redesign. Since each run makes exactly one request regardless of
-`--limit`, a full `npu_bolt/` run split across a handful of manually-sized `--limit` calls stays
+`--limit`, a full `circe_datasets/npu_bolt/working_images/` run split across a handful of manually-sized `--limit` calls stays
 well inside the daily 20-request budget.
 
 ## Changing the model or the class taxonomy

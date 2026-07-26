@@ -1,12 +1,18 @@
 # SAM checkpoints - large, re-downloadable via huggingface_hub, never source
 *.pt
 
-# Source photo dataset - external/large, same treatment as model_training/datasets/ at repo root
+# Source photo dataset - external/large, read-only (same treatment as model_training/datasets/ at
+# repo root). npu_bolt/ + npu_bolt_cad_excluded/ are the pre-restructure paths, kept in case either
+# still exists locally in an unmigrated checkout.
 npu_bolt/
 npu_bolt_cad_excluded/
+datasets/
 
-# Pipeline output - regenerable via the numbered scripts, not source
-annotations/
+# Working copies + pipeline output (01/03/04/05/06 + _visualize_original_annotations.py) -
+# regenerable from datasets/ (read-only), one subfolder per dataset name, never source. See
+# circe_datasets/README.md.
+circe_datasets/*
+!circe_datasets/README.md
 
 # ultralytics' own auto-generated predict-run dumps (legacy from before the official-package
 # migration - defensive rule in case anything else creates a runs/ dir here later)
@@ -16,9 +22,14 @@ runs/
 # just kept out of git until confirmed safe to remove
 er_16_annotations/
 
-# 01_remove_cad.py's log file - generated, not source (run_log.txt is already covered by
-# annotations/ above, since that's where it actually lives - out/run_log.txt)
+# 01_remove_cad.py's log file at the pre-restructure root location - generated, not source. The
+# current run now writes this under circe_datasets/npu_bolt/ instead (already covered above); this
+# entry just catches any leftover file at the old path.
 cleanup_cad_log.txt
 
 # sam3_minimal.py's saved diagnostic mask overlays - debug output, not source
 outputs/
+
+# gradio_app.py's own log (applog.py) - separate from each stage's own
+# circe_datasets/npu_bolt/run_log.txt, generated, not source
+ui_logs/
