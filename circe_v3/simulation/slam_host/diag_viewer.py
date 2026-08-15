@@ -218,8 +218,13 @@ def _unpack(value: str | None):
 # --------------------------------------------------------------------------- #
 class _State:
     def __init__(self, run_dir: str):
+        self.run_dir_base = os.path.dirname(run_dir)
         self.run_dir = run_dir
         self.logger = RunLogger(run_dir)
+        # Server-side session id (see slam_host/README.md "Sessions"). Submap ids
+        # restart at 0 on every session reset, so this is load-bearing state, not
+        # decoration — see _sync_session().
+        self.session_id: int | None = None
         self.known_loops = 0
         self.last_submap_id = -1
         self.global_points: list[np.ndarray] = []
@@ -231,6 +236,48 @@ class _State:
         self.seen_submap_ids: set[int] = set()
         self.last_global_glb: str | None = None
         self.tick = 0
+
+
+def _sync_session(state: _State, session_id: int | None) -> bool:
+    """Detect a server-side session reset and rebuild viewer state for the new run.
+
+    The server treats one SLAM run as one session and **restarts submap ids at 0**
+    on every reset (slam_host/README.md "Sessions"). Carrying viewer state across
+    that boundary breaks the 3D viewers permanently and silently, in two ways:
+
+      1. ``/map?after_submap=<last id from the OLD run>`` makes the server filter
+         out the new run's submap 0..N — the viewer is told "no new submaps" forever.
+      2. Even if they came through, ``seen_submap_ids`` from the old run would skip
+         them as duplicates, so no ledger row / GLB is ever written.
+
+    This is the same cursor-staleness bug the README documents for
+    ``circe_vggt_client``. On a change we start a fresh run_dir so viewer runs line
+    up 1:1 with server sessions, which also makes "Past Runs" mean the same thing on
+    both sides.
+    """
+    if session_id is None or session_id == state.session_id:
+        return False
+
+    first_sync = state.session_id is None
+    state.session_id = session_id
+    state.known_loops = 0
+    state.last_submap_id = -1
+    state.seen_submap_ids = set()
+    state.global_points = []
+    state.global_colors = []
+    state.global_cams = []
+    state.first_pose = None
+    state.last_global_glb = None
+    state.ledger = []
+
+    if not first_sync:
+        # Keep the previous session's GLBs/log on disk untouched — they are that
+        # run's record and stay browsable via "Past Runs".
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        state.run_dir = os.path.join(state.run_dir_base, f"run_{ts}_session{session_id:03d}")
+        state.logger = RunLogger(state.run_dir)
+    state.logger.info(f"tracking server session_id={session_id}")
+    return True
 
 
 def _scene_scale(xyz: np.ndarray) -> float:
@@ -371,12 +418,17 @@ def _status_banner(status: dict | None, err: str | None, map_err: str | None = N
     cam = status.get("camera") or {}
     last_err = status.get("worker_last_error")
     busy = status.get("submap_in_flight") or status.get("map_lock_busy")
+    sid = status.get("session_id")
+    slabel = status.get("session_label")
+    sess = f"session {sid}" + (f" ({slabel})" if slabel else "") if sid is not None else "no session"
     lines = [
-        f"## {dot} worker_alive={alive}  |  **submaps={status.get('num_submaps')}  "
+        f"## {dot} worker_alive={alive}  |  **{sess}**  |  **submaps={status.get('num_submaps')}  "
         f"loops={status.get('num_loops')}**"
         + ("  ⏳ *submap in flight*" if busy else ""),
         f"camera: received={cam.get('received')} dropped={cam.get('dropped')} "
-        f"queued={cam.get('queued')}",
+        f"queued={cam.get('queued')}"
+        + (f"  |  past runs on server: {status.get('past_runs')}"
+           if status.get("past_runs") else ""),
     ]
     if last_err:
         lines.append(f"🔴 **worker_last_error:** `{last_err}`")
@@ -555,10 +607,21 @@ def make_app(slam_url: str, poll_period: float) -> gr.Blocks:
         def refresh():
             state.tick += 1
             status, status_err = _get_json(f"{slam_url}/status", timeout=_STATUS_TIMEOUT)
+
+            # Resync BEFORE building the /map query — the cursor in that URL is
+            # only meaningful within one session (see _sync_session).
+            if status:
+                _sync_session(state, status.get("session_id"))
+
             map_json, map_err = _get_json(
                 f"{slam_url}/map?after_submap={state.last_submap_id}"
                 f"&known_loops={state.known_loops}&voxel=0.02&max_points=200000",
                 timeout=_MAP_TIMEOUT)
+            # The map response also carries session_id; if it disagrees with the
+            # status we just read, the reset landed between the two calls — trust
+            # the map's own id, since that's the run its submaps belong to.
+            if map_json and _sync_session(state, map_json.get("session_id")):
+                map_json = None  # discard: it was fetched with the stale cursor
 
             frame = _get_frame_image(slam_url)
             if frame is not None:

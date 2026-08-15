@@ -222,6 +222,22 @@ against WSL's 12 GB ceiling. `diag_viewer` runs in-process with the server and w
 appending every poll's cloud to a list that was only ever decimated *for rendering*,
 never trimmed; accumulated points are now hard-capped at 600k and collapsed in place.
 
+### Fixed: diagnostic viewer went permanently blank after a session reset (2026-08-16)
+
+The sessions feature restarts submap ids at 0 on every reset. `diag_viewer.py` carried its
+submap cursor across that boundary, which broke it exactly the same way it broke
+`circe_vggt_client`: it kept requesting `/map?after_submap=<id from the OLD run>`, so the
+server filtered out the new run's submaps entirely — and even when a `full_refresh`
+delivered them, `seen_submap_ids` skipped them as duplicates. Net effect: **both 3D
+viewers stay empty forever after the first reset**, with no error anywhere.
+
+`_sync_session()` now watches `session_id` (present on **both** `/status` and `/map`) and,
+on a change, resets the cursor, seen-ids, accumulated geometry and ledger, then starts a
+fresh viewer `run_<ts>_session<NNN>/` so viewer runs line up 1:1 with server sessions.
+`/map` is re-checked separately because a reset can land *between* the status and map
+calls — that response is discarded rather than ingested against a stale cursor. The banner
+now shows the live session id/label and the server's past-run count.
+
 ### Logging (repo convention — see CLAUDE.md's "Verification" section)
 Every run writes a timestamped UTF-8 log file to `slam_server_logs/` (gitignored, override with
 `--log_dir`) — console output alone is never the record of a run. It captures: model load, the
