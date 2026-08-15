@@ -4,7 +4,12 @@
 
 /circe_vggt_client:
   ros__parameters:
-    slam_url: "http://127.0.0.1:8000"     # point at the SLAM laptop (WSL2 mirrored/portproxy)
+    slam_url: "http://127.0.0.1:8000"     # PLACEHOLDER — override with the SLAM laptop's real LAN IP,
+                                           # e.g. slam_url:=http://192.168.1.8:8000 (verified working via
+                                           # WSL mirrored networking + scoped firewall rules, see
+                                           # slam_host/README.md "Networking"). DHCP can change that IP —
+                                           # confirm it's still current before trusting it, don't assume
+                                           # it's permanent.
     jpeg_quality: 80
     map_poll_period: 1.0
     voxel: 0.0

@@ -1,7 +1,11 @@
 """Launch the VGGT-SLAM client. Point --slam_url at the off-board SLAM host
 (the WSL server on the SLAM laptop in sim; a native-Linux box on the real robot).
+Networking to reach the SLAM laptop is set up + verified there (WSL mirrored
+networking + two scoped Hyper-V/Windows Firewall rules for TCP/8000 — see
+slam_host/README.md "Networking"). Get its CURRENT LAN IP from whoever runs it
+(DHCP can change it, don't assume the example below stays valid):
 
-  ros2 launch circe_vggt_client client.launch.py slam_url:=http://192.168.1.50:8000
+  ros2 launch circe_vggt_client client.launch.py slam_url:=http://192.168.1.8:8000
 """
 
 from launch import LaunchDescription

@@ -243,7 +243,10 @@ Gradio app (rclpy node) on the sim laptop showing **the map the robot has AND it
 
 **Settled:** split topology; **8-shot ring**; **no subtree** (VGGT-SLAM stays at its own repo, `pip -e`
 installed); SLAM env = WSL `vggt` (py3.11 — *no* 3.12/cp312/RoboStack needed, the split removed that);
-transport = FastAPI/HTTP with the §4 contract; loop-closure `full_refresh`.
+transport = FastAPI/HTTP with the §4 contract; loop-closure `full_refresh`; **SLAM-laptop networking is
+done** — WSL mirrored networking + two scoped Hyper-V/Windows Firewall rules for TCP/8000, verified
+(`slam_host/README.md`'s "Networking" section has the exact commands + current LAN IP). Point
+`slam_url` at that IP; only real cross-machine reachability is unverified until the sim laptop connects.
 
 **[SIM-BOX: decide + document]:**
 - **Gazebo world.** No world is hardcoded (`circe_sim_gazebo/launch/sim.launch.py` takes it as a required

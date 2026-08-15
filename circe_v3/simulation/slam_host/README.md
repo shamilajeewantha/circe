@@ -79,22 +79,62 @@ Point cloud + poses are always **relative scale** — the rover resolves metric
 motion locally via §5 self-calibration; never assume `/map` returns metric units.
 
 ## Networking: reaching this server from the sim laptop
-`slam_server.py` binds `0.0.0.0`, but running it **inside WSL2** puts it on WSL's
-NAT'd subnet, so a second machine on the LAN can't reach it by default. Pick one:
 
-- **WSL mirrored networking (Windows 11, simplest):** add to `C:\Users\<you>\.wslconfig`
-  ```ini
-  [wsl2]
-  networkingMode=mirrored
-  ```
-  then `wsl --shutdown` and restart. WSL now shares the Windows host's LAN IP, so
-  the sim laptop connects to `http://<this-laptop-LAN-ip>:8000`.
-- **Port proxy (older Windows):** forward the Windows host port to the WSL IP:
-  ```powershell
-  netsh interface portproxy add v4tov4 listenport=8000 listenaddress=0.0.0.0 `
-        connectport=8000 connectaddress=$(wsl hostname -I).Trim()
-  ```
-  and allow port 8000 through Windows Firewall.
+`slam_server.py` binds `0.0.0.0`, but running it **inside WSL2** normally puts it on
+WSL's own NAT'd subnet, unreachable from a second LAN machine by default. **This is
+now set up and verified working, on this machine, as follows** (2026-08-15):
+
+### 1. WSL mirrored networking (done)
+`C:\Users\<you>\.wslconfig`:
+```ini
+[wsl2]
+memory=12GB
+networkingMode=mirrored
+```
+Applied via `wsl --shutdown` + restart. Confirmed: `wsl hostname -I` now returns the
+**same IP as the Windows host's LAN adapter** (verified `192.168.1.8` on both sides) —
+no separate WSL-only subnet anymore. The sim laptop connects to
+`http://192.168.1.8:8000` (or whatever this laptop's current LAN IP is — check both
+`wsl hostname -I` and the Windows host's IP match before trusting this address; DHCP
+can reassign it after a reboot).
+
+### 2. Firewall rules (done — two separate layers, both required)
+Mirrored networking alone does **not** open the port — verified both layers
+default-deny inbound on this machine (`Get-NetFirewallHyperVVMSetting` showed
+`DefaultInboundAction: Block`; `Get-NetFirewallProfile -Name Public` also showed
+`DefaultInboundAction: Block`, since this Wi-Fi network is categorized `Public`, not
+`Private`). Two rules were added, **each scoped to TCP port 8000 only** — run in an
+**elevated** PowerShell (Claude does not and will not run these itself — see the
+repo's `CLAUDE.md` hard rule on this):
+
+```powershell
+# Hyper-V firewall — governs WSL/mirrored-mode traffic specifically.
+# {40E0AC32-46A5-438A-A0B2-2B479E8F2E90} is WSL's fixed VMCreatorId
+# (from Get-NetFirewallHyperVVMCreator).
+New-NetFirewallHyperVRule -Name "CirceSlamServer" -DisplayName "Circe VGGT-SLAM server (port 8000)" `
+    -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts 8000
+
+# Regular Windows Firewall — governs the Windows host itself.
+New-NetFirewallRule -Name "CirceSlamServer" -DisplayName "Circe VGGT-SLAM server (port 8000)" `
+    -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+```
+
+Both confirmed `Enabled: True`, `Action: Allow`, scoped to TCP/8000 only — nothing
+broader was opened. To remove later: `Remove-NetFirewallHyperVRule -Name
+"CirceSlamServer"` and `Remove-NetFirewallRule -Name "CirceSlamServer"` (elevated).
+
+### What's NOT yet verified
+Actual cross-machine reachability — the above proves the Windows/WSL side is
+correctly configured to *accept* the connection, but there's no second device on
+this LAN yet to confirm a real inbound connection succeeds end-to-end. That
+confirms itself the first time `circe_vggt_client` on the sim laptop successfully
+hits `POST /frames`.
+
+### Security note
+This exposes `slam_server.py` (which has **no authentication** — anyone reaching
+port 8000 can `POST /frames` or `GET /map`) to the LAN. Accepted deliberately for a
+trusted home network with no other devices on it (2026-08-15 decision) — re-evaluate
+if that assumption ever changes (e.g. guests, IoT devices, a shared/office network).
 
 **On the real robot this whole section disappears** — the off-board box is native
 Linux on the LAN; only the frame source (Gazebo camera vs real RPi camera) differs.

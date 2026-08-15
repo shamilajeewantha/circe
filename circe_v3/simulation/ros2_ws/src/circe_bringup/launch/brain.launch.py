@@ -2,8 +2,14 @@
 
 Prereqs, in order:
   1. On the SLAM laptop:  python slam_host/slam_server.py --port 8000 --vis_map
-  2. On this (sim) box:   ros2 launch circe_sim_gazebo sim.launch.py world:=.../depot.sdf
-  3. Then:                ros2 launch circe_bringup brain.launch.py slam_url:=http://<slam-ip>:8000
+     Networking to reach it from here is already set up + verified on the SLAM
+     laptop (WSL mirrored networking + two scoped Hyper-V/Windows Firewall rules
+     for TCP/8000 — see slam_host/README.md "Networking"). Get its CURRENT LAN IP
+     from whoever runs it (DHCP can change it) — do not assume it stays fixed.
+  2. On this (sim) box:   ros2 launch circe_sim_gazebo sim.launch.py world:=<your chosen world>
+  3. Then:                ros2 launch circe_bringup brain.launch.py slam_url:=http://<slam-laptop-ip>:8000
+     (e.g. http://192.168.1.8:8000 was the verified address as of 2026-08-15 — confirm it's
+     still current, don't hardcode it as permanent.)
 
 Starts: vggt_client, localization, mapping, coverage, explore, driver, viz — all
 reading circe_bringup/config/params.yaml. Set include_viz:=false to skip the Gradio app.
