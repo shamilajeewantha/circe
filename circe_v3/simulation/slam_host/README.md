@@ -75,6 +75,7 @@ I don't have console access to this laptop):
 |------|---------|
 | `network_camera.py` | `NetworkCamera(vggt_slam.cameras.Camera)` — frames arrive over HTTP instead of RealSense |
 | `slam_server.py` | Loads VGGT + Solver, runs the submap loop, serves the HTTP API below |
+| `diag_viewer.py` | Live Gradio ground-truth viewer (frame/status/map) — auto-launched by `slam_server.py`, see "Diagnostic Gradio viewer" below |
 | `requirements-lock.txt` | Exact verified deps frozen from the working WSL `vggt` env |
 | `environment.yml` | Conda recreate spec |
 
@@ -101,9 +102,25 @@ installed `vggt_slam`, so `git pull`s of VGGT-SLAM stay clean.
 # WSL, vggt env, GPU:
 conda activate vggt
 cd /mnt/d/my_github/circe/circe_v3/simulation/slam_host
-python slam_server.py --port 8000 --submap_size 8 --vis_map
-#   --vis_map opens VGGT-SLAM's own viser raw-map viewer at http://localhost:8080
+python slam_server.py --port 8000 --submap_size 8
 ```
+This is a dev/research server, never production — **every diagnostic feature is always
+on, unconditionally, no flags to remember**: VGGT-SLAM's own viser raw-map viewer at
+`http://localhost:8080`, the built-in diagnostic Gradio viewer (below) at
+`http://localhost:7861`, DEBUG-level logging, and real FastAPI tracebacks in HTTP 500s.
+
+### Diagnostic Gradio viewer (`diag_viewer.py`) — ground truth, not a claim
+
+Runs **in-process** with `slam_server.py` by default (no separate script to remember to
+launch) at `http://localhost:7861`. It polls this same server's own HTTP API — `GET
+/status`, `GET /frame/latest`, `GET /map` — so everything on screen came directly off
+the wire that poll cycle: the actual latest incoming frame (proof frames are really
+arriving, not a count claiming they are), `worker_alive`/`worker_last_error` from
+`/status`, and the actual returned point cloud + submap trajectories rendered in 3D
+from `/map`. This exists specifically so "did we really get a submap" has a visual,
+verifiable answer instead of resting on log text or a description of one. Can also be
+run standalone against a remote server: `python diag_viewer.py --slam_url
+http://<slam-ip>:8000 --port 7861`.
 
 ### Logging (repo convention — see CLAUDE.md's "Verification" section)
 Every run writes a timestamped UTF-8 log file to `slam_server_logs/` (gitignored, override with
@@ -135,6 +152,7 @@ PY
 |---|---|---|
 | `POST /session` | `{intrinsics, width, height, submap_size?}` | config ack (relative scale; restart for a fresh map) |
 | `POST /frames` | multipart JPEG file(s) | `{received, queued}` |
+| `GET /frame/latest` | — | most recently POSTed frame, as JPEG (404 if none yet) — for `diag_viewer.py` |
 | `GET /pose/latest` | — | latest camera pose `T_cam_world` (4×4, **relative scale**) |
 | `GET /map` | `after_submap, known_loops, voxel, max_points` | `{full_refresh, num_submaps, num_loops, submaps:[{submap_id,poses}], cloud:{n,xyz_f32_b64,rgb_u8_b64}}` |
 | `GET /status` | — | worker + camera counters — `worker_started`/`worker_alive`/`worker_last_error` (see "Known issue" above), `num_submaps`, `num_loops`, `camera` |

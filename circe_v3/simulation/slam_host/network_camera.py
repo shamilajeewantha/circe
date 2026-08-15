@@ -48,6 +48,7 @@ class NetworkCamera(Camera):
         self._lock = threading.Lock()
         self._received = 0
         self._dropped = 0
+        self._latest_frame: Optional[np.ndarray] = None  # peek copy, not consumed from _q
         NetworkCamera.latest = self
 
     # --- Camera interface -------------------------------------------------
@@ -81,6 +82,7 @@ class NetworkCamera(Camera):
         """
         with self._lock:
             self._received += 1
+            self._latest_frame = frame_bgr
             try:
                 self._q.put_nowait(frame_bgr)
             except queue.Full:
@@ -90,6 +92,12 @@ class NetworkCamera(Camera):
                     self._dropped += 1
                 except queue.Empty:
                     pass
+
+    def get_latest_frame(self) -> Optional[np.ndarray]:
+        """Peek at the most recently POSTed frame without consuming it from the
+        SLAM queue — for a diagnostic viewer to show real proof frames arrived."""
+        with self._lock:
+            return self._latest_frame
 
     # --- introspection for /status ---------------------------------------
     def stats(self) -> dict:

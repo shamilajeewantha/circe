@@ -47,7 +47,7 @@ import torch
 log = logging.getLogger("slam_server")
 
 
-def _setup_logging(log_dir: str) -> None:
+def _setup_logging(log_dir: str, debug: bool = False) -> None:
     """Console + a UTF-8 log file per run (repo convention: never print-only for
     a long-running loop, always leave a file a session can be reconstructed from)."""
     os.makedirs(log_dir, exist_ok=True)
@@ -59,10 +59,10 @@ def _setup_logging(log_dir: str) -> None:
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG if debug else logging.INFO)
     root.addHandler(fh)
     root.addHandler(sh)
-    log.info("Logging to %s", path)
+    log.info("Logging to %s (debug=%s)", path, debug)
 
 # Register the network backend BEFORE anything reads BACKENDS.
 from vggt_slam.cameras import BACKENDS
@@ -74,7 +74,7 @@ from vggt_slam.solver import Solver          # noqa: E402
 from vggt.models.vggt import VGGT            # noqa: E402
 
 from fastapi import FastAPI, UploadFile, File, Query   # noqa: E402
-from fastapi.responses import JSONResponse             # noqa: E402
+from fastapi.responses import JSONResponse, Response   # noqa: E402
 import uvicorn                                          # noqa: E402
 
 
@@ -248,6 +248,19 @@ async def frames(files: List[UploadFile] = File(...)):
     return {"received": n, "queued": _camera.stats()["queued"]}
 
 
+@app.get("/frame/latest")
+def frame_latest():
+    """The most recently POSTed frame, as JPEG — ground truth for a diagnostic
+    viewer to prove real frames are arriving (not a claim, an actual image)."""
+    img = _camera.get_latest_frame() if _camera else None
+    if img is None:
+        return JSONResponse({"available": False}, status_code=404)
+    ok, buf = cv2.imencode(".jpg", img)
+    if not ok:
+        return JSONResponse({"available": False}, status_code=500)
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+
 @app.get("/pose/latest")
 def pose_latest():
     with data_lock:
@@ -307,14 +320,19 @@ def main() -> None:
     p.add_argument("--min_disparity", type=float, default=50.0)
     p.add_argument("--conf_threshold", type=float, default=25.0)
     p.add_argument("--lc_thres", type=float, default=0.95)
-    p.add_argument("--vis_map", action="store_true", help="open VGGT-SLAM's viser raw-map viewer")
     p.add_argument("--vis_voxel_size", type=float, default=None)
     p.add_argument("--keyframe_folder", default="slam_host_keyframes")
     p.add_argument("--log_dir", default="slam_server_logs")
     args = p.parse_args()
     _cfg.__dict__.update(vars(args))
+    # Never runs in production — this is a dev/research server. Every diagnostic
+    # feature is unconditionally on, always, no opt-out: viser raw-map viewer,
+    # the built-in Gradio ground-truth viewer, DEBUG logging, FastAPI tracebacks.
+    _cfg.vis_map = True
+    GRADIO_PORT = 7861
 
-    _setup_logging(args.log_dir)   # also captures uvicorn's own POST/GET access logs to file
+    _setup_logging(args.log_dir, debug=True)
+    app.debug = True
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log.info("device=%s; loading VGGT...", device)
@@ -326,8 +344,19 @@ def main() -> None:
 
     threading.Thread(target=slam_worker, daemon=True).start()
     _worker_started.wait(timeout=10)
+
+    # The diagnostic Gradio UI lives in-process here (not a separate script to
+    # remember to launch) — it polls this same server's own HTTP API on
+    # localhost, so what it shows is ground truth off the wire, same as any
+    # other client. prevent_thread_lock=True so it doesn't block uvicorn below.
+    from diag_viewer import make_app
+    gradio_demo = make_app(f"http://localhost:{args.port}", poll_period=2.0)
+    gradio_demo.launch(server_port=GRADIO_PORT, prevent_thread_lock=True,
+                        quiet=True, show_error=True)
+    log.info("diagnostic Gradio viewer at http://localhost:%d", GRADIO_PORT)
+
     log.info("serving on %s:%d", args.host, args.port)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="debug")
 
 
 if __name__ == "__main__":
