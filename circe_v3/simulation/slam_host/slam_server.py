@@ -98,6 +98,10 @@ _stop = threading.Event()
 # whatever terminal happens to be watching this process's stdout.
 _worker_last_beat = 0.0
 _worker_last_error: Optional[str] = None
+# submap_id -> the on-disk keyframe paths that made up that submap. Populated in
+# _process_submap; read (under data_lock) by GET /submap/{id}/frames, which the
+# diagnostic viewer uses to build each ledger row's real image gallery.
+_submap_frames: dict = {}
 
 
 def load_model(device: str) -> VGGT:
@@ -125,6 +129,8 @@ def _process_submap(frames: List[str]) -> None:
         with data_lock:
             _solver.add_points(preds)
             _solver.graph.optimize()
+            new_submap_id = int(list(_solver.map.ordered_submaps_by_key())[-1].get_id())
+            _submap_frames[new_submap_id] = list(frames)
             if _cfg.vis_map:
                 if len(preds.get("detected_loops", [])) > 0:
                     _solver.update_all_submap_vis()
@@ -259,6 +265,18 @@ def frame_latest():
     if not ok:
         return JSONResponse({"available": False}, status_code=500)
     return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+
+@app.get("/submap/{submap_id}/frames")
+def submap_frames(submap_id: int):
+    """The on-disk keyframe paths that made up this submap — for diag_viewer.py's
+    per-ledger-row image gallery. Paths are on THIS machine (slam_host runs the
+    viewer in-process), not served as bytes here."""
+    with data_lock:
+        paths = _submap_frames.get(submap_id)
+    if paths is None:
+        return JSONResponse({"available": False}, status_code=404)
+    return {"available": True, "submap_id": submap_id, "paths": paths}
 
 
 @app.get("/pose/latest")

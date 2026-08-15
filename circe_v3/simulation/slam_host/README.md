@@ -112,21 +112,42 @@ on, unconditionally, no flags to remember**: VGGT-SLAM's own viser raw-map viewe
 ### Diagnostic Gradio viewer (`diag_viewer.py`) — ground truth, not a claim
 
 Runs **in-process** with `slam_server.py` by default (no separate script to remember to
-launch) at `http://localhost:7861`. Same visual language as VGGT-SLAM's own
-`gradio_demo.py` — an interactive `gr.Model3D` (real glTF viewer, not a static plot)
-with camera-frustum wireframes color-coded **green = just arrived this poll, red =
-loop closure, blue = older** — `_camera_frustum_segments` and the OpenCV→glTF axis
-flip are copied verbatim from that file (proven-correct code, not reinvented), plus a
-`gr.Gallery` accumulating every incoming frame polled so far (image selection,
-snapshot to snapshot). It polls this same server's own HTTP API — `GET /status`, `GET
-/frame/latest`, `GET /map` — every ~2s, so everything on screen came directly off the
-wire that poll cycle: nothing is a description or a claim. Updates are incremental —
-each poll appends onto the running map exactly like clicking Reconstruct repeatedly in
-`gradio_demo.py` does, and a loop-closure `full_refresh` supersedes prior points rather
-than piling on top of them. This exists specifically so "did we really get a submap"
-has a visual, verifiable answer instead of resting on log text or a description of
-one. Can also be run standalone against a remote server: `python diag_viewer.py
---slam_url http://<slam-ip>:8000 --port 7861`.
+launch) at `http://localhost:7861`. Rebuilt to match the richness of the two reference
+Gradio apps on this machine — VGGT-SLAM's own `gradio_demo.py` and the substantially
+richer `my_slam_vggt_omega/{main.py,pipeline.py,glb_builder.py,logger.py}` +
+`vggt-omega/visual_util.py` (all read in full before writing this) — adapted to what
+our backend actually is (VGGT-SLAM's fixed-size submap loop, not VGGT-Omega's
+cube-covisibility algorithm) and to being a **live poll of a running server**, not a
+batch tool over an uploaded folder (so there's no Start button — it just watches):
+
+- **Twin `gr.Model3D` viewers** — *Latest Submap* (just the newest completed submap)
+  and *Global Map* (everything accumulated this session, newest submap highlighted
+  lime). Real interactive glTF, not a static plot.
+- **Solid colored camera-cone meshes**, not flat wireframes — `_integrate_camera_into_scene`
+  and the OpenGL scene-alignment helpers are copied near-verbatim from
+  `vggt-omega/visual_util.py` (pure geometry, no dependency on VGGT-Omega's tensor
+  shapes). Color: green = new submap, red = loop closure, lime = just added to the
+  global map this poll, gray = older.
+- **Arrow-key-navigable submap ledger** (`gr.Radio`, packed-value pattern from
+  `main.py`) — one row per completed submap; selecting a row (click or hover + ↑/↓)
+  instantly loads both viewers plus that submap's **real keyframe image gallery**,
+  fetched via the new `GET /submap/{id}/frames` endpoint (the actual on-disk frames
+  that made up that submap, not placeholders).
+- **Past-runs browser** — every session writes to its own `diag_viewer_outputs/run_<ts>/`
+  (JSONL log + saved `.glb`s); the dropdown reloads any previous run's full ledger from
+  disk, server doesn't need to still be running for that.
+- **`RunLogger`** — same JSONL + human `display`-line shape as `logger.py`, so a run is
+  reconstructable exactly like the reference's `run_log.jsonl`.
+- **Live health banner** (our own addition — neither reference needs it, since a
+  synchronous batch tool can't die mid-run the way a background streaming thread can):
+  `worker_alive`/`worker_last_error`/camera received-dropped-queued from `GET /status`,
+  polled every ~2s alongside `GET /frame/latest` and `GET /map`. Everything on screen
+  came directly off the wire that poll cycle — nothing is a description or a claim.
+  This exists specifically so "did we really get a submap" has a visual, verifiable
+  answer.
+
+Can also be run standalone against a remote server: `python diag_viewer.py --slam_url
+http://<slam-ip>:8000 --port 7861`.
 
 ### Logging (repo convention — see CLAUDE.md's "Verification" section)
 Every run writes a timestamped UTF-8 log file to `slam_server_logs/` (gitignored, override with
@@ -167,6 +188,7 @@ PY
 | `POST /session` | `{intrinsics, width, height, submap_size?}` | config ack (relative scale; restart for a fresh map) |
 | `POST /frames` | multipart JPEG file(s) | `{received, queued}` |
 | `GET /frame/latest` | — | most recently POSTed frame, as JPEG (404 if none yet) — for `diag_viewer.py` |
+| `GET /submap/{id}/frames` | — | `{paths: [...]}` — the on-disk keyframe paths that made up that submap (404 if unknown id) — for `diag_viewer.py`'s per-ledger-row image gallery |
 | `GET /pose/latest` | — | latest camera pose `T_cam_world` (4×4, **relative scale**) |
 | `GET /map` | `after_submap, known_loops, voxel, max_points` | `{full_refresh, num_submaps, num_loops, submaps:[{submap_id,poses}], cloud:{n,xyz_f32_b64,rgb_u8_b64}}` |
 | `GET /status` | — | worker + camera counters — `worker_started`/`worker_alive`/`worker_last_error` (see "Known issue" above), `num_submaps`, `num_loops`, `camera` |
