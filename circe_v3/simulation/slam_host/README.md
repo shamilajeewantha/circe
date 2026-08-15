@@ -112,15 +112,21 @@ on, unconditionally, no flags to remember**: VGGT-SLAM's own viser raw-map viewe
 ### Diagnostic Gradio viewer (`diag_viewer.py`) — ground truth, not a claim
 
 Runs **in-process** with `slam_server.py` by default (no separate script to remember to
-launch) at `http://localhost:7861`. It polls this same server's own HTTP API — `GET
-/status`, `GET /frame/latest`, `GET /map` — so everything on screen came directly off
-the wire that poll cycle: the actual latest incoming frame (proof frames are really
-arriving, not a count claiming they are), `worker_alive`/`worker_last_error` from
-`/status`, and the actual returned point cloud + submap trajectories rendered in 3D
-from `/map`. This exists specifically so "did we really get a submap" has a visual,
-verifiable answer instead of resting on log text or a description of one. Can also be
-run standalone against a remote server: `python diag_viewer.py --slam_url
-http://<slam-ip>:8000 --port 7861`.
+launch) at `http://localhost:7861`. Same visual language as VGGT-SLAM's own
+`gradio_demo.py` — an interactive `gr.Model3D` (real glTF viewer, not a static plot)
+with camera-frustum wireframes color-coded **green = just arrived this poll, red =
+loop closure, blue = older** — `_camera_frustum_segments` and the OpenCV→glTF axis
+flip are copied verbatim from that file (proven-correct code, not reinvented), plus a
+`gr.Gallery` accumulating every incoming frame polled so far (image selection,
+snapshot to snapshot). It polls this same server's own HTTP API — `GET /status`, `GET
+/frame/latest`, `GET /map` — every ~2s, so everything on screen came directly off the
+wire that poll cycle: nothing is a description or a claim. Updates are incremental —
+each poll appends onto the running map exactly like clicking Reconstruct repeatedly in
+`gradio_demo.py` does, and a loop-closure `full_refresh` supersedes prior points rather
+than piling on top of them. This exists specifically so "did we really get a submap"
+has a visual, verifiable answer instead of resting on log text or a description of
+one. Can also be run standalone against a remote server: `python diag_viewer.py
+--slam_url http://<slam-ip>:8000 --port 7861`.
 
 ### Logging (repo convention — see CLAUDE.md's "Verification" section)
 Every run writes a timestamped UTF-8 log file to `slam_server_logs/` (gitignored, override with
