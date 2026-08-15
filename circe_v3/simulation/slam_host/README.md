@@ -48,6 +48,16 @@ python slam_server.py --port 8000 --submap_size 8 --vis_map
 #   --vis_map opens VGGT-SLAM's own viser raw-map viewer at http://localhost:8080
 ```
 
+### Logging (repo convention — see CLAUDE.md's "Verification" section)
+Every run writes a timestamped UTF-8 log file to `slam_server_logs/` (gitignored, override with
+`--log_dir`) — console output alone is never the record of a run. It captures: model load, the
+worker's periodic `[frame N] keyframes_pending=X/target camera={...}` progress line (every 25 frames
+— the loop has no fixed N, so this is the "don't go silent" signal for an unbounded stream), every
+submap completion (`submap done (submaps=N loops=M)`), and uvicorn's own `POST /frames`/`GET /map`
+access log lines. **Read this file after a run instead of scrolling/pasting terminal history** — it's
+the actual record, and it's what tells you whether a submap really completed vs. the process being
+killed (`Ctrl+C`) before one could finish.
+
 ### Sanity check (no rover needed) — replay a folder as if it were the rover
 ```bash
 # from another shell in the vggt env: POST office_loop frames, then GET the map

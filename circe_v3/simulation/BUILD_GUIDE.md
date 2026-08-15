@@ -237,6 +237,27 @@ Gradio app (rclpy node) on the sim laptop showing **the map the robot has AND it
 5. **circe_viz** — live viewer shows map + coverage + robot pose/goal updating in real time.
 6. Record a rosbag of a full run.
 
+### Known issue from the first live joint test (2026-08-15) — needs your input
+
+First real cross-machine run worked at the transport level (`POST /frames`/`GET /map` all `200 OK`,
+1665+ frames received, 0 dropped) but **produced zero submaps**. `slam_server.py`'s new per-25-frame
+progress log (`slam_server_logs/slam_server_*.log` — see `slam_host/README.md` "Logging") showed the
+cause precisely: `keyframes_pending=1/9`, **stuck at exactly 1 for ~1950 straight frames**. The keyframe
+gate (`compute_disparity(img, min_disparity=50.0, ...)` in `slam_server.py`'s `slam_worker()`) accepted
+only the very first frame and rejected every frame after it as "not different enough" — so nothing ever
+reached the `submap_size(8)+overlapping_window_size(1)=9` threshold needed to trigger a submap.
+
+**Two possible causes — only checkable from the sim side:**
+1. **The rover genuinely wasn't moving / the camera view wasn't changing** during that run — in which
+   case 0 disparity is *correct*, and there's no server-side bug: the fix is making sure the rover is
+   actually driving (or the 8-shot ring is actually rotating) while frames are being streamed.
+2. **`min_disparity=50.0` (the server's default) is too high** for whatever motion the Gazebo camera
+   actually produces — a real tuning issue, fixed by lowering `--min_disparity` on the SLAM laptop's
+   launch command.
+
+**Action:** confirm whether the rover was actually moving during that test. If yes and this persists,
+report back with that confirmation so `--min_disparity` can be tuned down from here.
+
 ---
 
 ## 8. Settled + delegated

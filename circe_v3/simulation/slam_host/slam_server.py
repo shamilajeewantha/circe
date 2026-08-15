@@ -33,14 +33,36 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import cv2
 import numpy as np
 import torch
+
+log = logging.getLogger("slam_server")
+
+
+def _setup_logging(log_dir: str) -> None:
+    """Console + a UTF-8 log file per run (repo convention: never print-only for
+    a long-running loop, always leave a file a session can be reconstructed from)."""
+    os.makedirs(log_dir, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = os.path.join(log_dir, f"slam_server_{ts}.log")
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    fh = logging.FileHandler(path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(fh)
+    root.addHandler(sh)
+    log.info("Logging to %s", path)
 
 # Register the network backend BEFORE anything reads BACKENDS.
 from vggt_slam.cameras import BACKENDS
@@ -101,12 +123,10 @@ def _process_submap(frames: List[str]) -> None:
                     _solver.update_all_submap_vis()
                 else:
                     _solver.update_latest_submap_vis()
-        print(f"[SLAM] submap done "
-              f"(submaps={_solver.map.get_num_submaps()} loops={_solver.graph.get_num_loops()})")
-    except Exception as e:  # keep the loop alive on a bad submap
-        import traceback
-        print(f"[SLAM ERROR] {e}")
-        traceback.print_exc()
+        log.info("submap done (submaps=%d loops=%d)",
+                 _solver.map.get_num_submaps(), _solver.graph.get_num_loops())
+    except Exception:  # keep the loop alive on a bad submap
+        log.exception("submap processing failed")
     finally:
         if solver_lock.locked():
             solver_lock.release()
@@ -120,7 +140,7 @@ def slam_worker() -> None:
     target = _cfg.submap_size + _cfg.overlapping_window_size
     os.makedirs(_cfg.keyframe_folder, exist_ok=True)
     _worker_started.set()
-    print("[SLAM] worker started; waiting for frames...")
+    log.info("worker started; waiting for frames...")
 
     while not _stop.is_set():
         img = _camera.capture(timeout=1.0)
@@ -131,6 +151,10 @@ def slam_worker() -> None:
             path = os.path.join(_cfg.keyframe_folder, f"frame_{frame_count:06d}.png")
             cv2.imwrite(path, img)
             subset.append(path)
+
+        if frame_count % 25 == 0:      # mandatory progress signal for a loop with no fixed N
+            log.info("[frame %d] keyframes_pending=%d/%d camera=%s",
+                      frame_count, len(subset), target, _camera.stats())
 
         if len(subset) >= target:
             if solver_lock.acquire(blocking=False):
@@ -267,20 +291,23 @@ def main() -> None:
     p.add_argument("--vis_map", action="store_true", help="open VGGT-SLAM's viser raw-map viewer")
     p.add_argument("--vis_voxel_size", type=float, default=None)
     p.add_argument("--keyframe_folder", default="slam_host_keyframes")
+    p.add_argument("--log_dir", default="slam_server_logs")
     args = p.parse_args()
     _cfg.__dict__.update(vars(args))
 
+    _setup_logging(args.log_dir)   # also captures uvicorn's own POST/GET access logs to file
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[SLAM] device={device}; loading VGGT...")
+    log.info("device=%s; loading VGGT...", device)
     _model = load_model(device)
     _solver = Solver(init_conf_threshold=args.conf_threshold, lc_thres=args.lc_thres,
                      vis_voxel_size=args.vis_voxel_size)
     _camera = NetworkCamera()
-    print("[SLAM] model + solver ready.")
+    log.info("model + solver ready.")
 
     threading.Thread(target=slam_worker, daemon=True).start()
     _worker_started.wait(timeout=10)
-    print(f"[SLAM] serving on {args.host}:{args.port}")
+    log.info("serving on %s:%d", args.host, args.port)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
