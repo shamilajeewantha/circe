@@ -132,6 +132,14 @@ access log lines. **Read this file after a run instead of scrolling/pasting term
 the actual record, and it's what tells you whether a submap really completed vs. the process being
 killed (`Ctrl+C`) before one could finish.
 
+**Fixed bug (2026-08-15):** `uvicorn.run(...)` was called without `log_config=None`, so it ran its own
+`logging.config.dictConfig()` on startup — which, per Python's `dictConfig(disable_existing_loggers=True)`
+default, **silenced this module's `log` logger the instant the server started serving**. Confirmed live:
+the log file went completely dark right after "serving on..." — zero `[frame N]` progress lines despite
+frames actively being received. `uvicorn.run(..., log_config=None)` fixes it (see the comment at that
+call site for the full mechanism). If a future run's log ever goes silent again right after startup with
+no explanation, check this exact thing first before assuming the worker died.
+
 ### Sanity check (no rover needed) — replay a folder as if it were the rover
 ```bash
 # from another shell in the vggt env: POST office_loop frames, then GET the map

@@ -356,7 +356,15 @@ def main() -> None:
     log.info("diagnostic Gradio viewer at http://localhost:%d", GRADIO_PORT)
 
     log.info("serving on %s:%d", args.host, args.port)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="debug")
+    # log_config=None is load-bearing, not cosmetic: uvicorn.run() otherwise calls
+    # logging.config.dictConfig() with its own default config, which — per Python's
+    # dictConfig(disable_existing_loggers=True) default — SILENCES this module's
+    # pre-existing `log` logger the instant uvicorn starts. Confirmed by evidence:
+    # the log file went dark right after "serving on..." with zero [frame N]
+    # progress lines despite frames actively arriving. log_config=None skips that
+    # dictConfig call entirely, so our root handlers (console+file) stay live and
+    # uvicorn's own access/error loggers propagate up into the same file for free.
+    uvicorn.run(app, host=args.host, port=args.port, log_level="debug", log_config=None)
 
 
 if __name__ == "__main__":
