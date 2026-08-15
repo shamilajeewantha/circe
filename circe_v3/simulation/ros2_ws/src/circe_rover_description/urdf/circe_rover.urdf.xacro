@@ -1,0 +1,120 @@
+<?xml version="1.0"?>
+<!-- circe low-profile skid-steer inspection rover.
+     Tracks are approximated by a 4-wheel skid-steer / DiffDrive (Gazebo Harmonic
+     has no cheap first-class track physics). Sensors: one HORIZONTAL forward RGB
+     camera at fixed H_CAM (RPi Cam v2 intrinsics, hFOV 62.2 deg), an IMU
+     (gyro+accel), and a forward narrow Range (ToF). Matches project.md §2. -->
+<robot name="circe_rover" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:property name="H_CAM"   value="0.18"/>   <!-- camera height (low) -->
+  <xacro:property name="base_x"  value="0.36"/>
+  <xacro:property name="base_y"  value="0.24"/>
+  <xacro:property name="base_z"  value="0.10"/>
+  <xacro:property name="wheel_r" value="0.06"/>
+  <xacro:property name="wheel_w" value="0.04"/>
+  <xacro:property name="track"   value="0.28"/>   <!-- wheel separation -->
+
+  <material name="grey"><color rgba="0.3 0.3 0.32 1"/></material>
+  <material name="black"><color rgba="0.05 0.05 0.05 1"/></material>
+
+  <link name="base_link">
+    <inertial>
+      <mass value="6.0"/>
+      <inertia ixx="0.06" ixy="0" ixz="0" iyy="0.10" iyz="0" izz="0.12"/>
+    </inertial>
+    <visual>
+      <geometry><box size="${base_x} ${base_y} ${base_z}"/></geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <geometry><box size="${base_x} ${base_y} ${base_z}"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 4 wheels: left/right x front/back (skid-steer) -->
+  <xacro:macro name="wheel" params="name x y">
+    <link name="${name}_link">
+      <inertial><mass value="0.4"/>
+        <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/></inertial>
+      <visual><origin rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+        <material name="black"/></visual>
+      <collision><origin rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry></collision>
+    </link>
+    <joint name="${name}_joint" type="continuous">
+      <parent link="base_link"/><child link="${name}_link"/>
+      <origin xyz="${x} ${y} ${-base_z/2}"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+  <xacro:wheel name="fl" x="${ base_x/3}" y="${ track/2}"/>
+  <xacro:wheel name="fr" x="${ base_x/3}" y="${-track/2}"/>
+  <xacro:wheel name="bl" x="${-base_x/3}" y="${ track/2}"/>
+  <xacro:wheel name="br" x="${-base_x/3}" y="${-track/2}"/>
+
+  <!-- forward HORIZONTAL camera at H_CAM -->
+  <link name="camera_link"/>
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/><child link="camera_link"/>
+    <origin xyz="${base_x/2} 0 ${H_CAM - base_z/2}" rpy="0 0 0"/>
+  </joint>
+
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/><child link="imu_link"/><origin xyz="0 0 0"/>
+  </joint>
+
+  <link name="tof_link"/>
+  <joint name="tof_joint" type="fixed">
+    <parent link="base_link"/><child link="tof_link"/>
+    <origin xyz="${base_x/2} 0 0"/>
+  </joint>
+
+  <!-- ================= Gazebo (gz-sim Harmonic) ================= -->
+  <gazebo>
+    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+      <!-- skid-steer via two DiffDrive pairs sharing cmd; agent may tune -->
+      <left_joint>fl_joint</left_joint>
+      <left_joint>bl_joint</left_joint>
+      <right_joint>fr_joint</right_joint>
+      <right_joint>br_joint</right_joint>
+      <wheel_separation>${track}</wheel_separation>
+      <wheel_radius>${wheel_r}</wheel_radius>
+      <topic>/rover/cmd_vel</topic>
+      <odom_topic>/rover/odom</odom_topic>
+      <max_linear_acceleration>1.0</max_linear_acceleration>
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="camera_link">
+    <sensor name="camera" type="camera">
+      <always_on>1</always_on>
+      <update_rate>30</update_rate>
+      <topic>/rover/camera/image</topic>
+      <camera>
+        <horizontal_fov>1.0857</horizontal_fov> <!-- 62.2 deg, RPi Cam v2 -->
+        <image><width>1280</width><height>720</height><format>R8G8B8</format></image>
+        <clip><near>0.05</near><far>30.0</far></clip>
+      </camera>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="imu_link">
+    <sensor name="imu" type="imu">
+      <always_on>1</always_on><update_rate>100</update_rate>
+      <topic>/rover/imu</topic>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="tof_link">
+    <sensor name="tof" type="gpu_lidar">   <!-- narrow single-ray = ToF -->
+      <always_on>1</always_on><update_rate>20</update_rate>
+      <topic>/rover/tof</topic>
+      <lidar>
+        <scan><horizontal><samples>1</samples><min_angle>0</min_angle><max_angle>0</max_angle></horizontal></scan>
+        <range><min>0.05</min><max>4.0</max></range>
+      </lidar>
+    </sensor>
+  </gazebo>
+</robot>

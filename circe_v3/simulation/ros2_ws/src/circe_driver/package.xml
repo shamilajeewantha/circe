@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>circe_driver</name>
+  <version>0.1.0</version>
+  <description>Skid-steer rotate/drive + 8-shot ring + ToF hard-interrupt reflex for the circe rover.</description>
+  <maintainer email="shamilajeewantha1@gmail.com">Shamila</maintainer>
+  <license>MIT</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>circe_common</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

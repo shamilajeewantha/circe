@@ -57,6 +57,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    is exactly the moment to ask a one-line clarifying question — never to silently pick the answer
    you think is smarter.
 
+6. **Never compromise the security of either of the user's laptops — this Windows machine or the
+   Ubuntu/RTX sim box.** Both hold personal data alongside this project's code. This applies to every
+   action, not just code changes: opening a port, changing firewall/WSL networking config, exposing a
+   local server to the LAN, weakening or removing auth, disabling a security feature, or handing the
+   Ubuntu-box agent an instruction that would do any of the above there too. Before taking any action
+   with real security exposure (e.g. WSL mirrored networking, `netsh portproxy`, binding a server to
+   `0.0.0.0`), **state the exposure plainly and get explicit confirmation first** — do not just proceed
+   because it's the "next logical step" in a plan. When a service must be reachable from the LAN (e.g.
+   `slam_server.py` for the split sim topology), prefer adding real access control (e.g. a shared-secret
+   header) over leaving it open, and say so rather than silently shipping it unauthenticated.
+
 ## Repository overview
 
 This is **not a single application** — it's a collection of loosely related, independently-runnable

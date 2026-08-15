@@ -1,0 +1,63 @@
+# VGGT-SLAM host — verified working dependency lock
+# =================================================
+# Frozen from the WSL `vggt` conda env on this laptop (Python 3.11.15), which
+# runs VGGT-SLAM 2.0 for the circe_v3 simulation. Captured with `pip freeze`
+# after confirming CUDA + all imports (Solver / VGGT / cameras.BACKENDS / gtsam)
+# load on an RTX 4050 (torch 2.3.1+cu121, CUDA 12.1).
+#
+# CRITICAL PINS (do not drift):
+#   torch==2.3.1+cu121   torchvision==0.18.1+cu121   triton==2.3.1
+#   gtsam-develop==4.3a1.dev202606262021   (SL(4) backend; drives graph.optimize())
+#   viser==0.2.23   numpy==1.26.1   open3d==0.19.0   trimesh==4.12.2
+#   fastapi==0.138.1   uvicorn==0.49.0   (already present — used by slam_server.py)
+#   gradio==5.50.0   (used by the repo's gradio_demo.py raw-map viewer)
+#
+# The three editable VCS installs below come from VGGT-SLAM's setup.sh
+# (pinned commits, verified on this machine):
+#   salad @ 33ca9c0  (github.com/Dominic101/salad)
+#   vggt  @ 6e6e161  (github.com/MIT-SPARK/VGGT_SPARK)   [imported as `vggt`]
+#   vggt_slam @ 35327ac (github.com/MIT-SPARK/VGGT-SLAM)  [real-time code present]
+# perception_models + sam3 are NOT installed and NOT needed (only for --run_os).
+#
+# NOTE: this is a documentation lock of a *shared* env; a few unrelated packages
+# (e.g. lingbot-map, evo, rosbags) are noise from other projects and are safe to
+# ignore. `torch`/`torchvision` must be installed from the cu121 index:
+#   pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+# -------------------------------------------------------------------------------
+absl-py==2.4.0
+accelerate==1.14.0
+einops==0.8.2
+fastapi==0.138.1
+ftfy==6.3.1
+gradio==5.50.0
+gtsam-develop==4.3a1.dev202606262021
+h11==0.16.0
+httpx==0.28.1
+huggingface_hub==0.36.2
+lz4==4.4.5
+matplotlib==3.11.0
+numpy==1.26.1
+omegaconf==2.3.1
+open3d==0.19.0
+opencv-python==4.11.0.86
+pillow==10.3.0
+python-multipart==0.0.32
+pytorch-lightning==2.6.5
+pytorch-metric-learning==2.9.0
+regex==2026.5.9
+requests==2.34.2
+safetensors==0.8.0
+scipy==1.16.3
+starlette==0.52.1
+termcolor==3.3.0
+torch==2.3.1+cu121
+torchvision==0.18.1+cu121
+tqdm==4.68.3
+trimesh==4.12.2
+triton==2.3.1
+uvicorn==0.49.0
+viser==0.2.23
+# --- editable, from VGGT-SLAM/setup.sh (pinned commits) ---
+-e git+https://github.com/Dominic101/salad.git@33ca9c0ca1e10cbb21efc0d6a5fcb6d45688e42d#egg=salad
+-e git+https://github.com/MIT-SPARK/VGGT_SPARK.git@6e6e16107b88e8e76c751826af10d4295d87ecd2#egg=vggt
+-e git+https://github.com/MIT-SPARK/VGGT-SLAM.git@35327ac28b7d193df9ccc39ba6346052bb6f1207#egg=vggt_slam

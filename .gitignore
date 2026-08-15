@@ -77,3 +77,6 @@ model_training/reports/index.html
 model_training/reports/dropped_images.csv
 model_training/reports/embedding.json
 model_training/reports/*_run.log
+
+# circe_v3 sim — slam_server.py smoke-test keyframes, generated debug output, not source
+circe_v3/simulation/slam_host/slam_host_keyframes/

@@ -1,0 +1,69 @@
+# Central tunables for the circe rover brain (all [SIM-BOX] to calibrate).
+# Camera intrinsics must match the URDF sensor (1280x720, hFOV 62.2°):
+#   fx = fy ≈ (W/2)/tan(hFOV/2) = 640/tan(0.5428) ≈ 1055 ; cx=640, cy=360.
+
+/circe_vggt_client:
+  ros__parameters:
+    slam_url: "http://127.0.0.1:8000"     # point at the SLAM laptop (WSL2 mirrored/portproxy)
+    jpeg_quality: 80
+    map_poll_period: 1.0
+    voxel: 0.0
+    max_points: 400000
+    frame_id: "vggt_map"
+
+/circe_localization:
+  ros__parameters:
+    scale_ema: 0.3
+    frame_id: "vggt_map"
+
+/circe_mapping:
+  ros__parameters:
+    voxel_size: 0.05
+    max_points: 400000
+    recompute_period: 1.0
+    frame_id: "vggt_map"
+
+/circe_coverage:
+  ros__parameters:
+    voxel_size: 0.05
+    fx: 1055.0
+    fy: 1055.0
+    cx: 640.0
+    cy: 360.0
+    width: 1280
+    height: 720
+    F_MIN: 6.0
+    COS_INCIDENCE_MIN: 0.5
+    floor_normal_cos: 0.8
+    frame_id: "vggt_map"
+
+/circe_explore:
+  ros__parameters:
+    H_CAM: 0.18
+    d_h: 0.6
+    R_CLUSTER: 0.25
+    W_TURN: 0.3
+    fx: 1055.0
+    cx: 640.0
+    cy: 360.0
+    width: 1280
+    height: 720
+    F_MIN: 6.0
+    COS_INCIDENCE_MIN: 0.5
+    period: 2.0
+    frame_id: "vggt_map"
+
+/circe_driver:
+  ros__parameters:
+    kp_ang: 1.5
+    kp_lin: 0.6
+    max_ang: 0.8
+    max_lin: 0.25
+    yaw_tol: 0.05
+    pos_tol: 0.10
+    tof_stop: 0.35
+    cam_forward: 0.18
+    cam_height: 0.18
+    ring_steps: 8
+    settle_ticks: 10
+    frame_id: "vggt_map"

@@ -1,0 +1,32 @@
+# ros_gz_bridge config: Gazebo Harmonic <-> ROS 2 topic bridges for the circe rover.
+# Note: the ToF is a single-ray gpu_lidar → LaserScan; circe_driver takes min(ranges)
+# as the forward clearance (there is no first-class Range sensor in gz-sim).
+- ros_topic_name: "/rover/camera/image"
+  gz_topic_name: "/rover/camera/image"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/rover/camera/camera_info"
+  gz_topic_name: "/rover/camera/camera_info"
+  ros_type_name: "sensor_msgs/msg/CameraInfo"
+  gz_type_name: "gz.msgs.CameraInfo"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/rover/imu"
+  gz_topic_name: "/rover/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/rover/tof"
+  gz_topic_name: "/rover/tof"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/rover/cmd_vel"
+  gz_topic_name: "/rover/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
