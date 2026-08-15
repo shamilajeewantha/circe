@@ -70,6 +70,52 @@ I don't have console access to this laptop):
    whether it's scene-specific or systemic — I don't, so please pick it up from
    here if my fix doesn't resolve it.
 
+## Sessions — one SLAM run per sim launch (added 2026-08-16)
+
+The server used to hold **one map for the whole process lifetime**, with no notion
+of a "run". Relaunching the sim therefore fused a brand-new Gazebo world — new
+scene, new coordinate frame — straight into the previous run's geometry. Observed
+directly: a freshly-restarted sim found the server already at `num_submaps: 39,
+num_loops: 3`, and the rover's client, still holding `after_submap=36` from the
+previous run, filtered out the entire new map and sat forever on a stale one.
+
+**Now: `POST /session` is the run boundary.** It archives the current map as a past
+run and resets to an empty one. `circe_vggt_client` calls it once at startup, so
+starting a new sim automatically makes the previous one a past run — no server
+restart needed for a fresh map any more.
+
+```bash
+curl -s localhost:8000/sessions   # current run + every archived past run
+```
+
+What a reset does and deliberately does **not** touch:
+
+| Component | Reset? | Why |
+|---|---|---|
+| `solver.map`, `solver.graph`, `solver.flow_tracker` | **yes** | the actual run state; all three are no-arg constructors upstream. Resetting `flow_tracker` matters — it makes the new run's first frame a keyframe again. |
+| `solver.current_working_submap` | **yes** | otherwise a half-built old submap leaks in |
+| `_submap_frames`, counters, `worker_last_error` | **yes** | submap ids restart at 0, so stale entries would mislabel new ones |
+| queued camera frames | **yes** (`NetworkCamera.drain()`) | frames still in flight belong to the old run |
+| pending keyframes in `slam_worker` | **yes** (via `_reset_generation`) | keyframes staged just before the reset would otherwise seed the new run's first submap |
+| `solver.viewer` | **no** | `Viewer.__init__` binds viser's port (8080); a second instance can't bind. Upstream exposes no clear method, so old geometry lingers in **viser only** until new submaps overwrite it by id — `/map`, which the rover actually consumes, is genuinely empty. |
+| `solver.image_retrieval` | **no** | verified stateless upstream (holds only the SALAD model + transform, no descriptor DB) — nothing to clear, and rebuilding would reload a ~336 MB checkpoint onto the GPU every reset. The retrieval database lives in `map`, which *is* reset. |
+
+Keyframes now go to `<keyframe_folder>/session_<id>/`, because frame numbering
+restarts each run and a single shared folder would have each new run overwrite the
+previous run's `frame_%06d.png` — which would make "past run" a lie.
+
+`GET /map` and `GET /status` both report `session_id`. That field is **load-bearing
+for clients, not informational**: submap ids restart at 0 each run, so a client
+holding a cursor from the previous run must reset it (and re-run §5 motion
+self-calibration) when it changes. `circe_vggt_client` does this automatically.
+
+**Concurrency:** the reset blocks on `solver_lock` first, so a submap inference
+already in flight finishes into the *old* map rather than landing in the new empty
+one after the swap.
+
+**Mid-run reconnect:** pass `{"reset": false}` to update config only and leave the
+current run intact — for a client reconnecting to a run it's already mapping into.
+
 ## What's here
 | File | Purpose |
 |------|---------|

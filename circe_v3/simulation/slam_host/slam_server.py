@@ -12,13 +12,19 @@ off-board SLAM over the network — exactly the project.md §9 split. This serve
 Because VGGT-SLAM ingests frames only through its Camera interface, the SAME
 server runs unchanged whether frames come from Gazebo or a real RPi camera.
 
+Sessions: one SLAM run = one session. POST /session ends the current run
+(archived, listed at GET /sessions) and starts an empty map, so relaunching the
+sim no longer fuses a new scene into the previous run's geometry.
+
 Endpoints
 ---------
-  POST /session   {intrinsics, width, height, submap_size?}  -> config ack
+  POST /session   {intrinsics, width, height, submap_size?, label?, reset?}
+                                                             -> new session (reset=false: config only)
+  GET  /sessions                                             -> current run + archived past runs
   POST /frames    multipart JPEG file(s)                     -> {received, queued}
   GET  /pose/latest                                          -> latest camera pose (rel scale)
-  GET  /map?after_submap=&known_loops=                       -> poses + cloud (delta or full_refresh)
-  GET  /status                                               -> solver + camera counters
+  GET  /map?after_submap=&known_loops=                       -> session_id + poses + cloud
+  GET  /status                                               -> session, solver + camera counters
 
 Run (WSL `vggt` env, GPU):
   python slam_server.py --port 8000 --submap_size 8 --vis_map
@@ -108,6 +114,21 @@ _submap_frames: dict = {}
 _n_submaps = 0
 _n_loops = 0
 
+# --- session state (one SLAM run = one session) ----------------------------- #
+# Without this the server had no notion of a "run": every sim relaunch kept
+# appending into the same map, so a fresh Gazebo world (new coordinate frame,
+# new scene) got fused on top of the previous run's geometry and the client's
+# submap cursor (after_submap=N) silently filtered out the whole new map.
+# POST /session now ends the current run and starts an empty one.
+_session_id = 0
+_session_label: Optional[str] = None
+_session_started_at = time.time()
+_past_runs: List[dict] = []
+# Bumped on every reset. slam_worker keeps its own copy and, when they differ,
+# drops its pending keyframes and renumbers — otherwise keyframes captured
+# just before the reset would leak into the new session's first submap.
+_reset_generation = 0
+
 
 def load_model(device: str) -> VGGT:
     """Load VGGT-1B — from the torch.hub checkpoint if present, else the HF URL
@@ -125,6 +146,92 @@ def load_model(device: str) -> VGGT:
     model.eval()
     model = model.to(torch.bfloat16).to(device)
     return model
+
+
+def _session_keyframe_dir(session_id: int) -> str:
+    """Per-session keyframe folder. Sessions restart frame numbering at 1, so a
+    single shared folder would have each new run overwrite the previous run's
+    frame_%06d.png — which would make "past run" a lie the moment you relaunch."""
+    return os.path.join(_cfg.keyframe_folder, f"session_{session_id:03d}")
+
+
+def _start_new_session(label: Optional[str] = None) -> dict:
+    """End the current run and start a fresh, empty map. Returns the new session.
+
+    Resets exactly the stateful pieces ``Solver.__init__`` builds, and nothing
+    else (all three take no constructor args — verified against upstream
+    ``vggt_slam/solver.py``). Deliberately NOT rebuilt:
+
+    * ``solver.viewer`` — ``Viewer.__init__`` binds viser's port (8080); a second
+      instance in the same process would fail to bind. It also exposes no clear
+      method upstream, so old geometry lingers in viser until the new run's
+      submaps overwrite it by id. That's cosmetic and viser-only; ``/map`` (what
+      the rover actually consumes) is genuinely empty after this call.
+    * ``solver.image_retrieval`` — verified stateless upstream (it holds only the
+      loaded SALAD model + an image transform, no descriptor database), so there
+      is nothing to clear and rebuilding it would reload a ~336 MB checkpoint
+      onto the GPU on every reset. The retrieval database lives in ``map``,
+      which IS rebuilt below.
+
+    They're rebuilt via ``type(x)()`` rather than importing ``GraphMap`` /
+    ``PoseGraph`` / ``FrameTracker`` directly: this module's contract is that it
+    imports the *installed* ``vggt_slam`` and never couples to vendored internals
+    (so upstream ``git pull``s stay clean), and those classes' import paths are an
+    upstream detail this file otherwise never depends on.
+    """
+    global _session_id, _session_label, _session_started_at, _reset_generation
+    global _n_submaps, _n_loops, _worker_last_error
+
+    # Block until any in-flight submap inference finishes. Without this, a
+    # _process_submap already running would call add_points() AFTER we swap in
+    # the empty map — silently seeding the new run with the old run's geometry.
+    acquired = solver_lock.acquire(timeout=180.0)
+    if not acquired:
+        log.warning("new session: submap still in flight after 180s; resetting anyway")
+    try:
+        with data_lock:
+            now = time.time()
+            finished = {
+                "session_id": _session_id,
+                "label": _session_label,
+                "started_at": _session_started_at,
+                "ended_at": now,
+                "duration_s": round(now - _session_started_at, 1),
+                "num_submaps": _n_submaps,
+                "num_loops": _n_loops,
+                "frames_received": _camera.stats()["received"] if _camera else 0,
+                "keyframe_dir": _session_keyframe_dir(_session_id),
+            }
+            _past_runs.append(finished)
+
+            _solver.map = type(_solver.map)()
+            _solver.graph = type(_solver.graph)()
+            _solver.flow_tracker = type(_solver.flow_tracker)()
+            _solver.current_working_submap = None
+
+            _submap_frames.clear()
+            _n_submaps = 0
+            _n_loops = 0
+            _worker_last_error = None
+
+            # Drop frames still queued from the previous run so they can't be
+            # consumed into the new session's first submap.
+            if _camera is not None:
+                _camera.drain()
+
+            _session_id += 1
+            _session_label = label
+            _session_started_at = now
+            os.makedirs(_session_keyframe_dir(_session_id), exist_ok=True)
+            _reset_generation += 1
+    finally:
+        if acquired:
+            solver_lock.release()
+
+    log.info("new session %d (label=%s); archived run %d (%d submaps, %d loops)",
+             _session_id, label, finished["session_id"],
+             finished["num_submaps"], finished["num_loops"])
+    return finished
 
 
 def _process_submap(frames: List[str]) -> None:
@@ -171,26 +278,42 @@ def slam_worker() -> None:
     subset: List[str] = []
     frame_count = 0
     target = _cfg.submap_size + _cfg.overlapping_window_size
-    os.makedirs(_cfg.keyframe_folder, exist_ok=True)
+    my_generation = _reset_generation
+    kf_dir = _session_keyframe_dir(_session_id)
+    os.makedirs(kf_dir, exist_ok=True)
     _worker_started.set()
-    log.info("worker started; waiting for frames...")
+    log.info("worker started (session %d); waiting for frames...", _session_id)
 
     global _worker_last_beat, _worker_last_error
     while not _stop.is_set():
         _worker_last_beat = time.monotonic()
         try:
+            # A /session reset landed: drop keyframes staged for the old run and
+            # renumber into the new session's folder. Without this the first
+            # submap of a new run would be built partly from the previous run's
+            # frames — i.e. exactly the cross-run contamination sessions exist
+            # to prevent.
+            if _reset_generation != my_generation:
+                my_generation = _reset_generation
+                subset = []
+                frame_count = 0
+                kf_dir = _session_keyframe_dir(_session_id)
+                os.makedirs(kf_dir, exist_ok=True)
+                log.info("worker: switched to session %d, pending keyframes dropped",
+                         _session_id)
+
             img = _camera.capture(timeout=1.0)
             if img is None:
                 continue
             frame_count += 1
             if _solver.flow_tracker.compute_disparity(img, _cfg.min_disparity, False):
-                path = os.path.join(_cfg.keyframe_folder, f"frame_{frame_count:06d}.png")
+                path = os.path.join(kf_dir, f"frame_{frame_count:06d}.png")
                 cv2.imwrite(path, img)
                 subset.append(path)
 
             if frame_count % 25 == 0:      # mandatory progress signal for a loop with no fixed N
-                log.info("[frame %d] keyframes_pending=%d/%d camera=%s",
-                          frame_count, len(subset), target, _camera.stats())
+                log.info("[session %d][frame %d] keyframes_pending=%d/%d camera=%s",
+                          _session_id, frame_count, len(subset), target, _camera.stats())
 
             if len(subset) >= target:
                 if solver_lock.acquire(blocking=False):
@@ -249,16 +372,43 @@ app = FastAPI(title="circe VGGT-SLAM host")
 
 @app.post("/session")
 def session(payload: dict):
-    """Record camera intrinsics / config for the current run. Note: a *fresh*
-    map needs a server restart (viser binds its port once) — this endpoint
-    configures, it does not rebuild the Solver."""
+    """Start a NEW run: archive the current map as a past run, reset to empty.
+
+    This is the run boundary — the rover client calls it once at startup, so
+    relaunching the sim (new world, new coordinate frame) no longer fuses into
+    the previous run's map. A server restart is no longer required for a fresh
+    map; past runs stay listed at ``GET /sessions`` and their keyframes stay on
+    disk under ``<keyframe_folder>/session_<id>/``.
+
+    Pass ``{"reset": false}`` to only update config (intrinsics/size) without
+    ending the current run — e.g. a client reconnecting mid-run that must not
+    destroy the map it is already mapping into.
+    """
     _cfg.intrinsics = payload.get("intrinsics")
     _cfg.width = payload.get("width")
     _cfg.height = payload.get("height")
     if payload.get("submap_size"):
         _cfg.submap_size = int(payload["submap_size"])
-    return {"ok": True, "submap_size": _cfg.submap_size,
-            "note": "relative scale; restart server for a fresh map"}
+
+    if not payload.get("reset", True):
+        return {"ok": True, "reset": False, "session_id": _session_id,
+                "submap_size": _cfg.submap_size,
+                "note": "config only; current run left intact (relative scale)"}
+
+    archived = _start_new_session(label=payload.get("label"))
+    return {"ok": True, "reset": True, "session_id": _session_id,
+            "submap_size": _cfg.submap_size, "archived_run": archived,
+            "note": "fresh empty map; relative scale"}
+
+
+@app.get("/sessions")
+def sessions():
+    """Past runs (archived, newest last) + the run currently building."""
+    return {"current": {"session_id": _session_id, "label": _session_label,
+                        "started_at": _session_started_at,
+                        "num_submaps": _n_submaps, "num_loops": _n_loops,
+                        "keyframe_dir": _session_keyframe_dir(_session_id)},
+            "past_runs": _past_runs}
 
 
 @app.post("/frames")
@@ -330,7 +480,12 @@ def get_map(after_submap: int = Query(-1), known_loops: int = Query(0),
         chosen = all_submaps if full_refresh else \
             [sm for sm in all_submaps if int(sm.get_id()) > after_submap]
         poses_out, cloud = _collect(chosen, voxel, max_points)
-    return {"full_refresh": full_refresh, "num_submaps": num_submaps,
+    # session_id is load-bearing for the client, not informational: submap ids
+    # restart at 0 each run, so a client still holding after_submap=N from the
+    # previous run would filter out the entire new map and see it as empty.
+    # On a change, the client must reset its cursor and rebuild (§5 self-cal too).
+    return {"session_id": _session_id,
+            "full_refresh": full_refresh, "num_submaps": num_submaps,
             "num_loops": num_loops, "submaps": poses_out, "cloud": cloud}
 
 
@@ -352,6 +507,8 @@ def status():
     alive = _worker_started.is_set() and (time.monotonic() - _worker_last_beat) < 5.0
     return {"worker_started": _worker_started.is_set(), "worker_alive": alive,
             "worker_last_error": _worker_last_error,
+            "session_id": _session_id, "session_label": _session_label,
+            "past_runs": len(_past_runs),
             "num_submaps": _n_submaps, "num_loops": _n_loops,
             "submap_in_flight": solver_lock.locked(),
             "map_lock_busy": data_lock.locked(),
@@ -359,7 +516,7 @@ def status():
 
 
 def main() -> None:
-    global _model, _solver, _camera
+    global _model, _solver, _camera, _session_started_at
     p = argparse.ArgumentParser(description="circe VGGT-SLAM host server")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)
@@ -389,7 +546,8 @@ def main() -> None:
     _solver = Solver(init_conf_threshold=args.conf_threshold, lc_thres=args.lc_thres,
                      vis_voxel_size=args.vis_voxel_size)
     _camera = NetworkCamera()
-    log.info("model + solver ready.")
+    _session_started_at = time.time()   # real run-0 start, not module-import time
+    log.info("model + solver ready (session %d).", _session_id)
 
     threading.Thread(target=slam_worker, daemon=True).start()
     _worker_started.wait(timeout=10)

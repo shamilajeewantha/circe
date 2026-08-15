@@ -56,7 +56,9 @@ class VggtClient(Node):
         # last map marker we've consumed, for delta requests
         self._after_submap = -1
         self._known_loops = 0
+        self._server_session_id = None     # SLAM-side run id; see _poll_map
         self._session = requests.Session()
+        self._start_slam_session()
 
         self.create_subscription(Image, "/rover/camera/image", self._on_image, 10)
         self.pub_pose = self.create_publisher(Odometry, "/vggt/pose", 10)
@@ -65,6 +67,27 @@ class VggtClient(Node):
         period = float(self.get_parameter("map_poll_period").value)
         self.create_timer(period, self._poll_map)
         self.get_logger().info(f"circe_vggt_client → SLAM host {self.url}")
+
+    # --- session ---------------------------------------------------------
+    def _start_slam_session(self) -> None:
+        """Tell the SLAM host a new run is starting, so it archives the previous
+        map instead of fusing this sim's scene into it. This node starts once per
+        sim launch, so exactly one new session per run — which is the intent."""
+        try:
+            r = self._session.post(f"{self.url}/session",
+                                   json={"label": "circe_sim", "reset": True},
+                                   timeout=10.0)
+            r.raise_for_status()
+            info = r.json()
+            self._server_session_id = info.get("session_id")
+            self.get_logger().info(
+                f"SLAM session {self._server_session_id} started "
+                f"(archived run: {info.get('archived_run', {}).get('session_id')})")
+        except requests.RequestException as e:
+            # Non-fatal: the rover can still map, it just shares whatever run the
+            # server already had. Loud, because that silently means a stale map.
+            self.get_logger().error(
+                f"POST /session failed ({e}) — SLAM may append to a PREVIOUS run's map")
 
     # --- frames up -------------------------------------------------------
     def _on_image(self, msg: Image) -> None:
@@ -95,6 +118,19 @@ class VggtClient(Node):
         except requests.RequestException as e:
             self.get_logger().warn(f"GET /map failed: {e}", throttle_duration_sec=5.0)
             return
+
+        # The SLAM host restarted its run (server restart, or another client
+        # opened a session). Submap ids restart at 0 there, so keeping our old
+        # cursor would filter out the whole new map and we'd sit on a stale one
+        # forever, seeing "no new submaps" while SLAM is actually mapping.
+        sid = m.get("session_id")
+        if sid is not None and sid != self._server_session_id:
+            self.get_logger().warn(
+                f"SLAM session changed {self._server_session_id} → {sid}; resetting map cache")
+            self._server_session_id = sid
+            self._after_submap = -1
+            self._known_loops = 0
+            return      # refetch from scratch next tick rather than trust this delta
 
         if m.get("full_refresh"):
             # loop closure re-optimised all poses → downstream must rebuild

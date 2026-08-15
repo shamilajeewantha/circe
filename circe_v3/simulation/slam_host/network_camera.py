@@ -99,6 +99,23 @@ class NetworkCamera(Camera):
         with self._lock:
             return self._latest_frame
 
+    def drain(self) -> int:
+        """Discard every queued frame; returns how many were dropped.
+
+        Called when a new SLAM session starts: frames still queued belong to the
+        *previous* run, and consuming them into the fresh map is exactly the
+        cross-run contamination sessions exist to prevent.
+        """
+        n = 0
+        with self._lock:
+            while True:
+                try:
+                    self._q.get_nowait()
+                    n += 1
+                except queue.Empty:
+                    break
+        return n
+
     # --- introspection for /status ---------------------------------------
     def stats(self) -> dict:
         return {
