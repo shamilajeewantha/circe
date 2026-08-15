@@ -102,6 +102,11 @@ _worker_last_error: Optional[str] = None
 # _process_submap; read (under data_lock) by GET /submap/{id}/frames, which the
 # diagnostic viewer uses to build each ledger row's real image gallery.
 _submap_frames: dict = {}
+# Plain-int mirrors of the solver's submap/loop counts, refreshed inside
+# _process_submap's critical section. /status reads THESE, never the solver —
+# so a health check can't block behind a long submap optimisation.
+_n_submaps = 0
+_n_loops = 0
 
 
 def load_model(device: str) -> VGGT:
@@ -124,20 +129,35 @@ def load_model(device: str) -> VGGT:
 
 def _process_submap(frames: List[str]) -> None:
     """Run VGGT + graph optimisation for one submap (background thread)."""
+    global _n_submaps, _n_loops
     try:
         preds = _solver.run_predictions(frames, _model, _cfg.max_loops, None, None)
+        t0 = time.monotonic()
         with data_lock:
             _solver.add_points(preds)
             _solver.graph.optimize()
             new_submap_id = int(list(_solver.map.ordered_submaps_by_key())[-1].get_id())
             _submap_frames[new_submap_id] = list(frames)
-            if _cfg.vis_map:
-                if len(preds.get("detected_loops", [])) > 0:
-                    _solver.update_all_submap_vis()
-                else:
-                    _solver.update_latest_submap_vis()
-        log.info("submap done (submaps=%d loops=%d)",
-                 _solver.map.get_num_submaps(), _solver.graph.get_num_loops())
+            # Cheap counters published for /status, which must never take
+            # data_lock (see the status endpoint for why).
+            _n_submaps = int(_solver.map.get_num_submaps())
+            _n_loops = int(_solver.graph.get_num_loops())
+        held = time.monotonic() - t0
+
+        # Viser visualisation is DELIBERATELY outside data_lock. update_all_submap_vis()
+        # re-pushes every submap's cloud to viser and grows with map size — measured
+        # holding the lock 90+s at 32 submaps/9 loops, which starved GET /status and
+        # GET /map into client-side read timeouts (the diagnostic viewer showed
+        # "unreachable" while SLAM was actually healthy). Viser reads the solver's own
+        # state; a concurrent reader here is no worse than the viser thread already is.
+        t1 = time.monotonic()
+        if _cfg.vis_map:
+            if len(preds.get("detected_loops", [])) > 0:
+                _solver.update_all_submap_vis()
+            else:
+                _solver.update_latest_submap_vis()
+        log.info("submap done (submaps=%d loops=%d) lock_held=%.2fs vis=%.2fs",
+                 _n_submaps, _n_loops, held, time.monotonic() - t1)
     except Exception:  # keep the loop alive on a bad submap
         log.exception("submap processing failed")
     finally:
@@ -272,8 +292,11 @@ def submap_frames(submap_id: int):
     """The on-disk keyframe paths that made up this submap — for diag_viewer.py's
     per-ledger-row image gallery. Paths are on THIS machine (slam_host runs the
     viewer in-process), not served as bytes here."""
-    with data_lock:
-        paths = _submap_frames.get(submap_id)
+    # Lock-free on purpose: taking data_lock for a single dict lookup would make
+    # this hang for the whole duration of a submap optimisation (same bug /status
+    # had). A plain dict .get() is atomic under CPython, and the only race is
+    # reading a key mid-insert — which just yields a 404 the client retries.
+    paths = _submap_frames.get(submap_id)
     if paths is None:
         return JSONResponse({"available": False}, status_code=404)
     return {"available": True, "submap_id": submap_id, "paths": paths}
@@ -313,9 +336,15 @@ def get_map(after_submap: int = Query(-1), known_loops: int = Query(0),
 
 @app.get("/status")
 def status():
-    with data_lock:
-        ns = int(_solver.map.get_num_submaps()) if _solver else 0
-        nl = int(_solver.graph.get_num_loops()) if _solver else 0
+    """Health check — MUST be lock-free and instant.
+
+    This deliberately reads the plain-int _n_submaps/_n_loops mirrors instead of
+    calling into the solver under data_lock. Taking data_lock here was a real bug:
+    a submap optimisation can hold it for tens of seconds, so every health poll
+    blocked and the diagnostic viewer reported "slam_server unreachable
+    (ReadTimeout)" while SLAM was in fact healthy and building submaps. A health
+    endpoint that hangs exactly when the system is busiest is worse than useless.
+    """
     # worker_started is one-shot (set once at thread launch) and stays True even
     # if the thread has since died — worker_alive is the real liveness signal:
     # False if slam_worker hasn't looped in >5s (it loops at least once/sec via
@@ -323,7 +352,9 @@ def status():
     alive = _worker_started.is_set() and (time.monotonic() - _worker_last_beat) < 5.0
     return {"worker_started": _worker_started.is_set(), "worker_alive": alive,
             "worker_last_error": _worker_last_error,
-            "num_submaps": ns, "num_loops": nl,
+            "num_submaps": _n_submaps, "num_loops": _n_loops,
+            "submap_in_flight": solver_lock.locked(),
+            "map_lock_busy": data_lock.locked(),
             "camera": _camera.stats() if _camera else None}
 
 

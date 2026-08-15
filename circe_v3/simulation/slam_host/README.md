@@ -149,6 +149,33 @@ batch tool over an uploaded folder (so there's no Start button — it just watch
 Can also be run standalone against a remote server: `python diag_viewer.py --slam_url
 http://<slam-ip>:8000 --port 7861`.
 
+### Fixed: viewer showed "unreachable" while SLAM was healthy (2026-08-16)
+
+Observed live at 32 submaps / 9 loop closures: the diagnostic viewer's banner read
+`🔴 slam_server unreachable — ReadTimeout`, and `curl http://localhost:8000/status` hung
+past 30s — **while the server was genuinely fine and still ingesting frames** (log kept
+printing `[frame 10350] keyframes_pending=7/9`). Root cause was lock starvation, not a
+crash:
+
+- `_process_submap` held `data_lock` across `add_points` + `graph.optimize()` **and
+  `update_all_submap_vis()`** — the viser update re-pushes *every* submap's cloud and
+  grows with map size, measured holding the lock 90+ seconds at that map size.
+- `GET /status` and `GET /submap/{id}/frames` both took `data_lock` too, so a health
+  check blocked exactly when the system was busiest — the worst possible time to go dark.
+
+Fixes: viser updates moved **outside** the critical section; `/status` now reads plain-int
+`_n_submaps`/`_n_loops` mirrors and never takes the lock (plus reports `submap_in_flight`
+/ `map_lock_busy` so "busy" is visibly distinct from "dead"); `/submap/{id}/frames` does a
+lock-free dict read; `submap done` now logs `lock_held=` and `vis=` timings so a
+regression here is measurable, not guessed. Viewer-side, `/status` (4s) and `/map` (60s)
+have separate timeouts — one shared 4s budget meant a merely-slow map fetch was reported
+as a dead server.
+
+**Also fixed — unbounded memory.** The run before this died with the process at 8.1 GB
+against WSL's 12 GB ceiling. `diag_viewer` runs in-process with the server and was
+appending every poll's cloud to a list that was only ever decimated *for rendering*,
+never trimmed; accumulated points are now hard-capped at 600k and collapsed in place.
+
 ### Logging (repo convention — see CLAUDE.md's "Verification" section)
 Every run writes a timestamped UTF-8 log file to `slam_server_logs/` (gitignored, override with
 `--log_dir`) — console output alone is never the record of a run. It captures: model load, the

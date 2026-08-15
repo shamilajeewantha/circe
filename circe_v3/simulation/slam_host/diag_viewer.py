@@ -164,6 +164,21 @@ def _get_json(url: str, timeout: float = 4.0):
         return None, f"{type(e).__name__}: {e}"
 
 
+# GET /status is lock-free and answers instantly — a short timeout there is a real
+# health signal. GET /map still serialises the whole map under data_lock and can
+# legitimately take tens of seconds on a large map, so it gets a much longer budget:
+# with one shared 4s timeout, a merely-slow /map made the banner scream "server
+# unreachable" while SLAM was perfectly healthy. Separate budgets, separate verdicts.
+_STATUS_TIMEOUT = 4.0
+_MAP_TIMEOUT = 60.0
+
+# Hard ceiling on accumulated global-map points held in RAM. This viewer runs
+# in-process with slam_server (which already holds VGGT ~5 GB + every submap's
+# cloud), and the server was observed dying at 8.1 GB against WSL's 12 GB cap —
+# so unbounded accumulation here is not a cosmetic concern.
+_MAX_GLOBAL_POINTS = 600_000
+
+
 def _get_frame_image(slam_url: str):
     try:
         r = requests.get(f"{slam_url}/frame/latest", timeout=3.0)
@@ -325,9 +340,16 @@ def _build_global_scene(state: _State) -> str | None:
     scene = trimesh.Scene()
     xyz = np.concatenate(state.global_points, axis=0)
     rgb = np.concatenate(state.global_colors, axis=0)
-    if len(xyz) > 600_000:
-        idx = np.linspace(0, len(xyz) - 1, 600_000).astype(int)
+    if len(xyz) > _MAX_GLOBAL_POINTS:
+        idx = np.linspace(0, len(xyz) - 1, _MAX_GLOBAL_POINTS).astype(int)
         xyz, rgb = xyz[idx], rgb[idx]
+        # Collapse the accumulated per-poll chunks down to this one decimated
+        # array. Without this the raw lists keep growing for the life of the
+        # process — and this viewer runs IN-PROCESS with slam_server, which was
+        # observed dying at 8.1 GB of WSL's 12 GB ceiling. Decimating only the
+        # render while retaining every raw chunk in memory would be a slow leak.
+        state.global_points = [xyz]
+        state.global_colors = [rgb]
     scene.add_geometry(trimesh.PointCloud(vertices=xyz, colors=rgb))
     scale = _scene_scale(xyz)
     for pose, base_color, is_newest in state.global_cams:
@@ -341,21 +363,27 @@ def _build_global_scene(state: _State) -> str | None:
     return out_path
 
 
-def _status_banner(status: dict | None, err: str | None) -> str:
+def _status_banner(status: dict | None, err: str | None, map_err: str | None = None) -> str:
     if err is not None:
         return f"## 🔴 slam_server unreachable — {err}"
     alive = status.get("worker_alive")
     dot = "🟢" if alive else "🔴"
     cam = status.get("camera") or {}
     last_err = status.get("worker_last_error")
+    busy = status.get("submap_in_flight") or status.get("map_lock_busy")
     lines = [
         f"## {dot} worker_alive={alive}  |  **submaps={status.get('num_submaps')}  "
-        f"loops={status.get('num_loops')}**",
+        f"loops={status.get('num_loops')}**"
+        + ("  ⏳ *submap in flight*" if busy else ""),
         f"camera: received={cam.get('received')} dropped={cam.get('dropped')} "
         f"queued={cam.get('queued')}",
     ]
     if last_err:
         lines.append(f"🔴 **worker_last_error:** `{last_err}`")
+    if map_err:
+        # /status answered, so the server is alive — only the (expensive) map
+        # fetch failed. Say that precisely instead of implying the server is down.
+        lines.append(f"⚠️ map fetch failed this tick (server is alive): `{map_err}`")
     return "  \n".join(lines)
 
 
@@ -526,10 +554,11 @@ def make_app(slam_url: str, poll_period: float) -> gr.Blocks:
 
         def refresh():
             state.tick += 1
-            status, status_err = _get_json(f"{slam_url}/status")
-            map_json, _ = _get_json(
+            status, status_err = _get_json(f"{slam_url}/status", timeout=_STATUS_TIMEOUT)
+            map_json, map_err = _get_json(
                 f"{slam_url}/map?after_submap={state.last_submap_id}"
-                f"&known_loops={state.known_loops}&voxel=0.02&max_points=200000")
+                f"&known_loops={state.known_loops}&voxel=0.02&max_points=200000",
+                timeout=_MAP_TIMEOUT)
 
             frame = _get_frame_image(slam_url)
             if frame is not None:
@@ -561,7 +590,7 @@ def make_app(slam_url: str, poll_period: float) -> gr.Blocks:
                 log_tail = "\n".join(lines[-40:])
 
             return (
-                _status_banner(status, status_err), frame, list(reversed(state.frame_strip)),
+                _status_banner(status, status_err, map_err), frame, list(reversed(state.frame_strip)),
                 (status or {}), submap_view, global_view,
                 gr.update(choices=state.ledger, value=radio_value), gallery_view,
                 log_tail,
