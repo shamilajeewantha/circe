@@ -91,6 +91,13 @@ _camera: Optional[NetworkCamera] = None
 _cfg = argparse.Namespace()
 _worker_started = threading.Event()
 _stop = threading.Event()
+# _worker_started is one-shot (set once, never cleared), so on its own it can't
+# tell /status apart from "worker is fine" vs "worker's thread died an hour ago".
+# Track real liveness separately: bumped every loop iteration, plus the last
+# per-frame exception (if any) so a crash is visible over HTTP, not just in
+# whatever terminal happens to be watching this process's stdout.
+_worker_last_beat = 0.0
+_worker_last_error: Optional[str] = None
 
 
 def load_model(device: str) -> VGGT:
@@ -142,27 +149,33 @@ def slam_worker() -> None:
     _worker_started.set()
     log.info("worker started; waiting for frames...")
 
+    global _worker_last_beat, _worker_last_error
     while not _stop.is_set():
-        img = _camera.capture(timeout=1.0)
-        if img is None:
-            continue
-        frame_count += 1
-        if _solver.flow_tracker.compute_disparity(img, _cfg.min_disparity, False):
-            path = os.path.join(_cfg.keyframe_folder, f"frame_{frame_count:06d}.png")
-            cv2.imwrite(path, img)
-            subset.append(path)
+        _worker_last_beat = time.monotonic()
+        try:
+            img = _camera.capture(timeout=1.0)
+            if img is None:
+                continue
+            frame_count += 1
+            if _solver.flow_tracker.compute_disparity(img, _cfg.min_disparity, False):
+                path = os.path.join(_cfg.keyframe_folder, f"frame_{frame_count:06d}.png")
+                cv2.imwrite(path, img)
+                subset.append(path)
 
-        if frame_count % 25 == 0:      # mandatory progress signal for a loop with no fixed N
-            log.info("[frame %d] keyframes_pending=%d/%d camera=%s",
-                      frame_count, len(subset), target, _camera.stats())
+            if frame_count % 25 == 0:      # mandatory progress signal for a loop with no fixed N
+                log.info("[frame %d] keyframes_pending=%d/%d camera=%s",
+                          frame_count, len(subset), target, _camera.stats())
 
-        if len(subset) >= target:
-            if solver_lock.acquire(blocking=False):
-                t = threading.Thread(target=_process_submap, args=(list(subset),), daemon=True)
-                t.start()
-                subset = subset[-_cfg.overlapping_window_size:]
-            elif len(subset) > target * 2:      # SLAM busy; bound the backlog
-                subset = subset[-target:]
+            if len(subset) >= target:
+                if solver_lock.acquire(blocking=False):
+                    t = threading.Thread(target=_process_submap, args=(list(subset),), daemon=True)
+                    t.start()
+                    subset = subset[-_cfg.overlapping_window_size:]
+                elif len(subset) > target * 2:      # SLAM busy; bound the backlog
+                    subset = subset[-target:]
+        except Exception as e:  # a single bad frame must not silently kill this thread
+            _worker_last_error = f"{type(e).__name__}: {e}"
+            log.exception("slam_worker: frame %d failed, skipping", frame_count)
 
 
 # --------------------------------------------------------------------------- #
@@ -272,7 +285,13 @@ def status():
     with data_lock:
         ns = int(_solver.map.get_num_submaps()) if _solver else 0
         nl = int(_solver.graph.get_num_loops()) if _solver else 0
-    return {"worker_started": _worker_started.is_set(),
+    # worker_started is one-shot (set once at thread launch) and stays True even
+    # if the thread has since died — worker_alive is the real liveness signal:
+    # False if slam_worker hasn't looped in >5s (it loops at least once/sec via
+    # _camera.capture(timeout=1.0), so a stalled/dead thread shows up within 5s).
+    alive = _worker_started.is_set() and (time.monotonic() - _worker_last_beat) < 5.0
+    return {"worker_started": _worker_started.is_set(), "worker_alive": alive,
+            "worker_last_error": _worker_last_error,
             "num_submaps": ns, "num_loops": nl,
             "camera": _camera.stats() if _camera else None}
 

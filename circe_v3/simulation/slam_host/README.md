@@ -13,6 +13,63 @@ to the real robot** — only the frame *source* differs.
                                                           + viser raw-map viewer :8080
 ```
 
+## ⚠️ Known issue (2026-08-15) — `num_submaps` stuck at 0, needs your verification
+
+Found from the sim-laptop side during the first live end-to-end test against a
+real running `slam_server.py` at `192.168.1.8:8000`. Symptoms, all confirmed from
+the sim laptop (not guesses):
+
+- `GET /status` stayed at `num_submaps: 0` through the **entire** session — even
+  after the rover drove **2.4m of real, confirmed motion** in Gazebo and the
+  server received **~8500 real (non-degenerate) camera frames** (verified: frame
+  content has real changing texture, mean pixel value ~114-118, consecutive-frame
+  diffs up to 15.5 — this is not blank/frozen images).
+- `camera.queued` stayed pinned at its `256` cap for the whole run, `dropped`
+  climbed monotonically, `received` kept climbing — consistent with `POST /frames`
+  (FastAPI/`NetworkCamera.push`) staying alive and well, but **nothing draining
+  the queue on the consumer side**.
+- Checked VGGT-SLAM's own public `FrameTracker.compute_disparity` — on the very
+  first call (`self.last_kf is None`) it unconditionally returns `True`, so the
+  very first frame reaching it should always become a keyframe. That never
+  visibly happened here.
+
+**Root-cause hypothesis, not yet confirmed:** `slam_worker()`'s while-loop had
+**no exception handling** around its body — unlike `_process_submap()` right
+above it, which explicitly wraps its work in `try/except Exception:
+log.exception(...)` with the comment *"keep the loop alive on a bad submap"*.
+If literally anything threw on an early frame (inside `compute_disparity`'s
+Lucas-Kanade tracking, `cv2.imwrite`, etc.), the background thread would die
+**silently** — `_worker_started` is a one-shot flag set once at thread launch,
+so `/status` would keep reporting `worker_started: true` forever even with the
+thread long dead. This matches every symptom above exactly.
+
+**What I changed** (this file's fix, applied but **not yet verified running** —
+I don't have console access to this laptop):
+1. Wrapped `slam_worker()`'s per-frame loop body in `try/except Exception`,
+   logging via `log.exception(...)` and continuing to the next frame, matching
+   `_process_submap`'s pattern — a single bad frame can no longer kill the thread.
+2. Added real liveness to `/status`: `worker_alive` (`False` if the loop hasn't
+   ticked in >5s — it loops at least once/sec via `_camera.capture(timeout=1.0)`,
+   so a stalled/dead thread now shows up within 5s instead of forever reporting
+   `worker_started: true`) and `worker_last_error` (the most recent per-frame
+   exception's `repr`, or `null`).
+
+**What I need you to do, from this machine:**
+1. `git pull` (or however you sync — this file changed under me mid-session,
+   so you're clearly already active on it) and restart `slam_server.py`.
+2. Feed it real motion again (Gazebo rover driving, or the office_loop replay
+   below) and watch `GET /status` — specifically `worker_alive` and
+   `worker_last_error`. If `worker_last_error` populates, that's the actual bug
+   — read the traceback in `slam_server_logs/` and fix it there (my try/except
+   only stops it from being silent, it doesn't fix whatever's actually throwing).
+3. If `worker_alive` stays `true` and `worker_last_error` stays `null` but
+   `num_submaps` is *still* 0 after real motion, my hypothesis was wrong —
+   the bug is elsewhere (maybe `min_disparity=50.0` is genuinely too high for
+   this scene, or something else in the VGGT-SLAM pinned commit). You have
+   console access and can run the office_loop sanity check below to isolate
+   whether it's scene-specific or systemic — I don't, so please pick it up from
+   here if my fix doesn't resolve it.
+
 ## What's here
 | File | Purpose |
 |------|---------|
@@ -80,7 +137,7 @@ PY
 | `POST /frames` | multipart JPEG file(s) | `{received, queued}` |
 | `GET /pose/latest` | — | latest camera pose `T_cam_world` (4×4, **relative scale**) |
 | `GET /map` | `after_submap, known_loops, voxel, max_points` | `{full_refresh, num_submaps, num_loops, submaps:[{submap_id,poses}], cloud:{n,xyz_f32_b64,rgb_u8_b64}}` |
-| `GET /status` | — | worker + camera counters |
+| `GET /status` | — | worker + camera counters — `worker_started`/`worker_alive`/`worker_last_error` (see "Known issue" above), `num_submaps`, `num_loops`, `camera` |
 
 **Loop closures:** a loop closure re-optimises *all* poses. When the loop count
 grows past the client's `known_loops`, `/map` sets `full_refresh:true` and returns
