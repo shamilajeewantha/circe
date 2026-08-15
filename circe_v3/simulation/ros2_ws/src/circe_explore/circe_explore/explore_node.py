@@ -82,6 +82,7 @@ class Explore(Node):
         self.surf_p = np.empty((0, 3), np.float32)
         self.surf_n = np.empty((0, 3), np.float32)
         self.rover = np.zeros(3); self.rover_yaw = 0.0
+        self._map_seen = False   # has mapping produced ANY data yet? (cold-start guard, see _plan)
 
         self.create_subscription(PointCloud2, "/circe/detection_gaps", self._gaps, 1)
         self.create_subscription(PointCloud2, "/circe/frontiers", self._frontier, 1)
@@ -92,10 +93,15 @@ class Explore(Node):
         self.create_timer(float(g("period").value), self._plan)
 
     def _gaps(self, m): self.gaps = read_points(m, ("x", "y", "z"))
-    def _frontier(self, m): self.frontier = read_points(m, ("x", "y", "z"))
+    def _frontier(self, m):
+        self.frontier = read_points(m, ("x", "y", "z"))
+        if len(self.frontier) > 0:
+            self._map_seen = True
     def _surfels(self, m):
         d = read_points(m, ("x", "y", "z", "nx", "ny", "nz"))
         self.surf_p, self.surf_n = d[:, :3], d[:, 3:6]
+        if len(self.surf_p) > 0:
+            self._map_seen = True
     def _pose(self, m):
         p, o = m.pose.pose.position, m.pose.pose.orientation
         self.rover = np.array([p.x, p.y, p.z])
@@ -155,7 +161,15 @@ class Explore(Node):
             yaw = math.atan2(C[1] - self.rover[1], C[0] - self.rover[0])
             self._emit(c, yaw); return
 
-        # --- both layers closed ---
+        # --- both layers closed --- but only once mapping has actually produced
+        # something at least once: at cold start gaps/frontier are BOTH trivially
+        # empty (nothing mapped yet), which is indistinguishable from "fully explored"
+        # unless guarded — without this, DONE latches permanently on the very first
+        # tick (circe_driver has no un-latch path) and the rover never moves.
+        if not self._map_seen:
+            self.get_logger().info("waiting for first map data (cold start)...",
+                                   throttle_duration_sec=5.0)
+            return
         self.pub_done.publish(Bool(data=True))
         self.get_logger().info("DONE — no reachable detection gap or frontier", throttle_duration_sec=5.0)
 

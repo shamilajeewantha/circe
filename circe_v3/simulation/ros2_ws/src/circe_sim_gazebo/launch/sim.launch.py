@@ -6,9 +6,13 @@ SDF via the `world` arg. Pick one you can actually get running on your install a
 that gives the coverage-aware NBV loop something to chew on: enough occluded/
 non-convex structure that fog frontier + detection gaps aren't trivial, sized so a
 full run finishes in reasonable time, and no missing-asset/model-path headaches.
-TurtleBot4's `depot.sdf` is one evidence-backed option (BUILD_GUIDE.md §3) —
+TurtleBot4's `depot.sdf` is one evidence-backed option (BUILD_GUIDE.md §3) — but the
+stock world (ros-jazzy-turtlebot4-simulator, at .../turtlebot4_gz_bringup/worlds/depot.sdf)
+ships its Sensors system plugin COMMENTED OUT, so camera/IMU/gpu_lidar sensors advertise
+gz topics but never publish data. Use this package's local fork instead, which is
+byte-identical except that plugin is enabled (see worlds/depot_sensors.sdf's own comment):
   ros2 launch circe_sim_gazebo sim.launch.py \
-      world:=$(ros2 pkg prefix turtlebot4_ignition_bringup)/share/turtlebot4_ignition_bringup/worlds/depot.sdf
+      world:=$(ros2 pkg prefix circe_sim_gazebo)/share/circe_sim_gazebo/worlds/depot_sensors.sdf
 but it's an example, not a mandate. Record whatever you land on (name + source +
 why) in BUILD_GUIDE.md §3/§8 so it's not a mystery later.
 """

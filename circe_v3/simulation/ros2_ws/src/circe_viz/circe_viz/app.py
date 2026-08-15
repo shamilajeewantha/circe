@@ -214,7 +214,7 @@ def stats_md() -> str:
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="circe_viz", theme=gr.themes.Ocean()) as demo:
+    with gr.Blocks(title="circe_viz") as demo:
         gr.HTML("<h2>circe_viz — live map &amp; decisions</h2>"
                 "<p>Live from ROS: the VGGT map, inspection surfels (green=covered, red=gap), fog frontier, "
                 "robot pose/trajectory (yellow), and next station (magenta).</p>")
@@ -254,7 +254,7 @@ def main():
     demo = build_ui()
     demo.queue(default_concurrency_limit=1)
     try:
-        demo.launch(server_name="0.0.0.0", server_port=args.port)
+        demo.launch(server_name="0.0.0.0", server_port=args.port, theme=gr.themes.Ocean())
     finally:
         rclpy.shutdown()
 

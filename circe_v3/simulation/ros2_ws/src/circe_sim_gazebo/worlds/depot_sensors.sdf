@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<!-- Local fork of turtlebot4_gz_bringup's depot.sdf (apt: ros-jazzy-turtlebot4-simulator) —
+     the stock world ships with NO sensor-driving system plugins loaded at all, so every
+     camera/IMU/gpu_lidar sensor on a spawned model advertises its gz topic but never
+     actually publishes data. Two fixes vs stock:
+       1. Sensors system (gz-sim-sensors-system, render_engine=ogre2) — drives camera +
+          gpu_lidar (both go through the render engine).
+       2. Imu system (gz-sim-imu-system) — separate plugin, drives IMU sensors; stock
+          depot.sdf doesn't even have this one commented out, it's just absent.
+     Kept as a small local copy rather than editing the apt-owned file in /opt/ros/jazzy/share
+     — the heavy Depot model itself still loads via the same Fuel URI below, nothing duplicated. -->
+<sdf version="1.6">
+  <world name="depot">
+    <scene>
+      <grid>false</grid>
+    </scene>
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.003</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin name="gz::sim::systems::Physics" filename="gz-sim-physics-system" />
+    <plugin name="gz::sim::systems::UserCommands" filename="gz-sim-user-commands-system" />
+    <plugin name="gz::sim::systems::SceneBroadcaster" filename="gz-sim-scene-broadcaster-system" />
+    <plugin name="gz::sim::systems::Contact" filename="gz-sim-contact-system" />
+    <plugin name="gz::sim::systems::Sensors" filename="gz-sim-sensors-system">
+        <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin name="gz::sim::systems::Imu" filename="gz-sim-imu-system" />
+
+    <include>
+      <uri>
+        https://fuel.gazebosim.org/1.0/OpenRobotics/models/Depot
+      </uri>
+    </include>
+
+  </world>
+</sdf>
