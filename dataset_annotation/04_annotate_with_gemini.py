@@ -172,7 +172,7 @@ log = logging.getLogger("gemini_annotate")
 # to go back to Flash). Whichever model actually ran is what gets tagged into cache/raw_gemini/*.json
 # and compared against on the next run - a mismatch (different model or PROMPT_VERSION) is always
 # automatically re-annotated in main(), no flag needed.
-DEFAULT_MODEL = "gemini-robotics-er-1.6-preview"
+DEFAULT_MODEL = "gemini-robotics-er-2-preview"
 
 # Prefix tagged onto every File API upload's display_name (see call_gemini_batch) - lets the
 # finally: cleanup sweep find and delete ANY file this script ever uploaded via a client.files.list()
@@ -203,9 +203,16 @@ GOOGLE_MAX_IMAGES_PER_REQUEST = 3600        # https://ai.google.dev/gemini-api/d
 # - so a documented number for ONE model is never a safe stand-in for another.
 MODEL_MAX_INPUT_TOKENS = {
     "gemini-robotics-er-1.6-preview": 131_072,
+    # Unconfirmed - carried over from -er-1.6-preview (same model family) as a conservative
+    # starting point, deliberately NOT the FALLBACK_MAX_INPUT_TOKENS below (that's gemini-3.5-flash's
+    # much larger cap, explicitly wrong for the -er family). Validate/correct via the same method
+    # that confirmed -1.6's real number: a real count_tokens()/400-error check against an actual
+    # call (see REAL INPUT-TOKEN CEILING comment above).
+    "gemini-robotics-er-2-preview": 131_072,
 }
 MODEL_MAX_OUTPUT_TOKENS = {
     "gemini-robotics-er-1.6-preview": 65_536,
+    "gemini-robotics-er-2-preview": 65_536,  # same unconfirmed carry-over as the input cap above
 }
 # Fallback ONLY for a --model not yet confirmed above - gemini-3.5-flash's own documented number,
 # explicitly NOT assumed accurate for any other model (see the mismatch that prompted this fix).
