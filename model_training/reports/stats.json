@@ -1,5 +1,5 @@
 {
-  "n_samples": 59818,
+  "n_samples": 60138,
   "taxonomy": [
     "concrete_crack",
     "corrosion",
@@ -10,8 +10,10 @@
     "efflorescence",
     "exposed_rebar",
     "spalling",
-    "loose_bolt",
-    "missing_bolt"
+    "missing_bolt",
+    "bolt_ok",
+    "bolt_defective",
+    "bolt_corroded"
   ],
   "class_totals": {
     "concrete_crack": 7814,
@@ -23,8 +25,10 @@
     "efflorescence": 808,
     "exposed_rebar": 1500,
     "spalling": 3796,
-    "loose_bolt": 531,
-    "missing_bolt": 437
+    "missing_bolt": 437,
+    "bolt_ok": 1822,
+    "bolt_defective": 179,
+    "bolt_corroded": 628
   },
   "per_source_class": {
     "corrosion__meee-aegk9": {
@@ -70,28 +74,37 @@
     "uminho-gya54crack-detection-concrete-gphbn": {
       "concrete_crack": 1551
     },
-    "sdnet-loose_bolt": {
-      "loose_bolt": 529
-    },
     "sdnet-missing_bolt": {
       "missing_bolt": 437,
-      "loose_bolt": 2
+      "bolt_corroded": 44,
+      "bolt_ok": 244,
+      "bolt_defective": 6
     },
-    "sdnet-fixed": {}
+    "gemini-npu_bolt": {
+      "bolt_ok": 724,
+      "bolt_corroded": 227,
+      "bolt_defective": 2
+    },
+    "gemini-sdnet_bolt": {
+      "bolt_defective": 171,
+      "bolt_ok": 854,
+      "bolt_corroded": 357
+    }
   },
   "orig_split_counts": {
     "train": 47159,
     "valid": 7268,
     "test": 4565,
-    "coco": 826
+    "coco": 200,
+    "unsplit": 946
   },
   "background_counts": {
     "train": 2196,
     "valid": 522,
     "test": 342,
-    "coco": 304
+    "unsplit": 12
   },
-  "n_duplicates": 4750,
+  "n_duplicates": 4753,
   "dropped_boxes": {
     "fire-smoke__ak-rfpt5 :: junk class 'Other' (people / watermarks / logos)": 5069,
     "fluid-patch__kuanhan-fu :: phantom class 'object' (single box on a parked motorbike)": 1,

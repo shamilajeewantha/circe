@@ -10,6 +10,7 @@
 
 Run in `drone_detect`:  python pipeline/03_export.py
 """
+import csv
 import random
 import shutil
 from collections import Counter, defaultdict
@@ -18,7 +19,7 @@ from pathlib import Path
 import fiftyone as fo
 
 from config import (BACKGROUND_MAX_SHARE, FO_DATASET_NAME, MERGED_DIR, NAME2ID,
-                    SPLIT_RATIOS, SPLIT_SEED, TAXONOMY)
+                    SPLIT_MANIFEST, SPLIT_RATIOS, SPLIT_SEED, TAXONOMY)
 from _util import DropLog, fo_to_yolo
 
 
@@ -35,12 +36,48 @@ def collect():
     return recs
 
 
+def load_manifest():
+    """{stem -> split} from reports/split_manifest.csv, or {} if it doesn't exist yet."""
+    if not SPLIT_MANIFEST.exists():
+        return {}
+    with SPLIT_MANIFEST.open(encoding="utf-8") as fh:
+        return {row["stem"]: row["split"] for row in csv.DictReader(fh)}
+
+
+def write_manifest(recs):
+    """Persist stem -> split for every exported image. This is what makes a split REPRODUCIBLE
+    across taxonomy changes - see stratified_split()."""
+    SPLIT_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    with SPLIT_MANIFEST.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["stem", "split"])
+        for r in sorted(recs, key=lambda r: f"{r['source']}__{Path(r['filepath']).stem}"):
+            w.writerow([f"{r['source']}__{Path(r['filepath']).stem}", r["split"]])
+
+
 def stratified_split(recs):
-    """Assign each record a split, stratified by primary label, with a fixed seed."""
+    """Assign each record a split, stratified by primary label, with a fixed seed.
+
+    HELD-OUT-SET INTEGRITY: any image already present in reports/split_manifest.csv keeps the split
+    it was given the FIRST time it was exported; only genuinely-new images are stratified into the
+    remaining space. Without this, re-running the pipeline after a taxonomy change silently
+    re-randomizes EVERYTHING: an image's bucket is keyed on its `primary` label, so relabelling one
+    source changes bucket sizes, which changes every subsequent rng.shuffle() draw - reassigning
+    images in completely unrelated classes. The previous run's test images would land in the new
+    training set, silently invalidating any comparison between runs (and contaminating the held-out
+    set) - discovered only after the GPU time was already spent.
+    """
+    manifest = load_manifest()
     rng = random.Random(SPLIT_SEED)
     by_label = defaultdict(list)
+    pinned = 0
     for r in recs:
-        by_label[r["primary"]].append(r)
+        stem = f"{r['source']}__{Path(r['filepath']).stem}"
+        if stem in manifest:
+            r["split"] = manifest[stem]
+            pinned += 1
+        else:
+            by_label[r["primary"]].append(r)
     for label, items in by_label.items():
         rng.shuffle(items)
         n = len(items)
@@ -48,6 +85,8 @@ def stratified_split(recs):
         n_va = int(n * SPLIT_RATIOS["valid"])
         for i, r in enumerate(items):
             r["split"] = "train" if i < n_tr else "valid" if i < n_tr + n_va else "test"
+    new = sum(len(v) for v in by_label.values())
+    print(f"split: {pinned} image(s) pinned from {SPLIT_MANIFEST.name}, {new} new image(s) stratified")
     return recs
 
 
@@ -106,6 +145,7 @@ def main():
     recs = apply_background_cap(stratified_split(collect()), drops)
     drops.close()
     img_counts, counts = write(recs)
+    write_manifest(recs)   # persist the split so the NEXT taxonomy change can't re-randomize it
 
     print(f"merged/ written: {sum(img_counts.values())} images")
     print(f"  {'class':<16}" + "".join(f"{s:>8}" for s in SPLIT_RATIOS) + f"{'total':>8}")
