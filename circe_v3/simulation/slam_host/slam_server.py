@@ -104,6 +104,20 @@ _stop = threading.Event()
 # whatever terminal happens to be watching this process's stdout.
 _worker_last_beat = 0.0
 _worker_last_error: Optional[str] = None
+# Pipeline-stage counters, so "no submaps" can be diagnosed over HTTP instead of
+# only from the server console. They separate the three ways it can stall:
+#   frames_seen == 0            -> frames aren't reaching the worker at all
+#   keyframes_pending stuck 0   -> the disparity gate is rejecting everything
+#                                  (rover not moving enough / min_disparity too high)
+#   keyframes_pending hits N,   -> submaps ARE being attempted; read submap_last_error
+#   then resets, submaps == 0
+_frames_seen = 0
+_keyframes_pending = 0
+_keyframes_total = 0
+# _process_submap runs in its own thread and only logged failures; a submap that
+# throws every time was invisible in /status while everything else looked healthy.
+_submap_last_error: Optional[str] = None
+_submaps_failed = 0
 # submap_id -> the on-disk keyframe paths that made up that submap. Populated in
 # _process_submap; read (under data_lock) by GET /submap/{id}/frames, which the
 # diagnostic viewer uses to build each ledger row's real image gallery.
@@ -181,6 +195,7 @@ def _start_new_session(label: Optional[str] = None) -> dict:
     """
     global _session_id, _session_label, _session_started_at, _reset_generation
     global _n_submaps, _n_loops, _worker_last_error
+    global _submap_last_error, _submaps_failed
 
     # Block until any in-flight submap inference finishes. Without this, a
     # _process_submap already running would call add_points() AFTER we swap in
@@ -199,6 +214,7 @@ def _start_new_session(label: Optional[str] = None) -> dict:
                 "duration_s": round(now - _session_started_at, 1),
                 "num_submaps": _n_submaps,
                 "num_loops": _n_loops,
+                "submaps_failed": _submaps_failed,
                 "frames_received": _camera.stats()["received"] if _camera else 0,
                 "keyframe_dir": _session_keyframe_dir(_session_id),
             }
@@ -213,6 +229,8 @@ def _start_new_session(label: Optional[str] = None) -> dict:
             _n_submaps = 0
             _n_loops = 0
             _worker_last_error = None
+            _submap_last_error = None   # a past run's failures aren't this run's
+            _submaps_failed = 0
 
             # Drop frames still queued from the previous run so they can't be
             # consumed into the new session's first submap.
@@ -236,7 +254,7 @@ def _start_new_session(label: Optional[str] = None) -> dict:
 
 def _process_submap(frames: List[str]) -> None:
     """Run VGGT + graph optimisation for one submap (background thread)."""
-    global _n_submaps, _n_loops
+    global _n_submaps, _n_loops, _submap_last_error, _submaps_failed
     try:
         preds = _solver.run_predictions(frames, _model, _cfg.max_loops, None, None)
         t0 = time.monotonic()
@@ -265,8 +283,10 @@ def _process_submap(frames: List[str]) -> None:
                 _solver.update_latest_submap_vis()
         log.info("submap done (submaps=%d loops=%d) lock_held=%.2fs vis=%.2fs",
                  _n_submaps, _n_loops, held, time.monotonic() - t1)
-    except Exception:  # keep the loop alive on a bad submap
-        log.exception("submap processing failed")
+    except Exception as e:  # keep the loop alive on a bad submap
+        _submap_last_error = f"{type(e).__name__}: {e}"
+        _submaps_failed += 1
+        log.exception("submap processing failed (%d total failures)", _submaps_failed)
     finally:
         if solver_lock.locked():
             solver_lock.release()
@@ -285,6 +305,7 @@ def slam_worker() -> None:
     log.info("worker started (session %d); waiting for frames...", _session_id)
 
     global _worker_last_beat, _worker_last_error
+    global _frames_seen, _keyframes_pending, _keyframes_total
     while not _stop.is_set():
         _worker_last_beat = time.monotonic()
         try:
@@ -299,6 +320,9 @@ def slam_worker() -> None:
                 frame_count = 0
                 kf_dir = _session_keyframe_dir(_session_id)
                 os.makedirs(kf_dir, exist_ok=True)
+                _frames_seen = 0
+                _keyframes_pending = 0
+                _keyframes_total = 0
                 log.info("worker: switched to session %d, pending keyframes dropped",
                          _session_id)
 
@@ -306,10 +330,13 @@ def slam_worker() -> None:
             if img is None:
                 continue
             frame_count += 1
+            _frames_seen = frame_count
             if _solver.flow_tracker.compute_disparity(img, _cfg.min_disparity, False):
                 path = os.path.join(kf_dir, f"frame_{frame_count:06d}.png")
                 cv2.imwrite(path, img)
                 subset.append(path)
+                _keyframes_total += 1
+            _keyframes_pending = len(subset)
 
             if frame_count % 25 == 0:      # mandatory progress signal for a loop with no fixed N
                 log.info("[session %d][frame %d] keyframes_pending=%d/%d camera=%s",
@@ -509,6 +536,14 @@ def status():
             "worker_last_error": _worker_last_error,
             "session_id": _session_id, "session_label": _session_label,
             "past_runs": len(_past_runs),
+            # pipeline stages — see the _frames_seen block for how to read these
+            "frames_seen": _frames_seen,
+            "keyframes_pending": _keyframes_pending,
+            "keyframes_needed": _cfg.submap_size + _cfg.overlapping_window_size,
+            "keyframes_total": _keyframes_total,
+            "submaps_failed": _submaps_failed,
+            "submap_last_error": _submap_last_error,
+            "min_disparity": _cfg.min_disparity,
             "num_submaps": _n_submaps, "num_loops": _n_loops,
             "submap_in_flight": solver_lock.locked(),
             "map_lock_busy": data_lock.locked(),
