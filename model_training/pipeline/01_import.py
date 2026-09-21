@@ -1,7 +1,7 @@
 """Step 1 — import all source YOLO folders into ONE FiftyOne dataset.
 
 - Reads every INCLUDED folder in datasets/ (by reference; source files untouched).
-- Remaps each source's raw classes into the unified 9-class `ground_truth` field
+- Remaps each source's raw classes into the unified 13-class `ground_truth` field
   using config.CLASS_MAP; boxes mapped to None are dropped (box-level).
 - Records per-sample `source` and `orig_split`.
 - Images whose only boxes were dropped are kept as background/negative samples.
@@ -11,12 +11,13 @@
 Run in the `drone_detect` env:  python pipeline/01_import.py
 """
 import json
+from collections import defaultdict
 from pathlib import Path
 
 import fiftyone as fo
 
-from config import (BACKGROUND_DIRS, CLASS_MAP, COCO_SOURCES, DATASETS_DIR, EXCLUDE_FOLDERS,
-                    FO_DATASET_NAME, IMG_EXTS, SPLITS_ON_DISK)
+from config import (BACKGROUND_DIRS, BOLT_CLASS_MAP, BOLT_YOLO_SOURCES, CLASS_MAP, COCO_SOURCES,
+                    DATASETS_DIR, EXCLUDE_FOLDERS, FO_DATASET_NAME, IMG_EXTS, SPLITS_ON_DISK)
 from _util import (DropLog, iter_split_images, read_yolo, source_names, yolo_to_fo)
 
 
@@ -79,6 +80,84 @@ def import_backgrounds(source, rel_dir, samples, per_source):
     per_source[source] = {"images": n, "boxes": 0, "background": n}
 
 
+def import_bolt_yolo(source, ds_dir, samples, per_source):
+    """Import a FLAT (unsplit) YOLO dir from the dataset_annotation/ pipeline: images/ + labels/,
+    class ids remapped through BOLT_CLASS_MAP into the shared taxonomy. Unlike the read-only
+    DATASETS_DIR sources these are produced by this repo, so the path is absolute, not relative."""
+    img_dir, lbl_dir = Path(ds_dir) / "images", Path(ds_dir) / "labels"
+    stats = {"images": 0, "boxes": 0, "background": 0}
+    for img in sorted(img_dir.iterdir()) if img_dir.is_dir() else []:
+        if img.suffix.lower() not in IMG_EXTS:
+            continue
+        dets = []
+        lbl = lbl_dir / f"{img.stem}.txt"
+        if lbl.exists():
+            for line in lbl.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                cid, xc, yc, w, h = line.split()
+                name = BOLT_CLASS_MAP.get(int(cid))
+                if name is None:
+                    continue
+                dets.append(fo.Detection(label=name,
+                                         bounding_box=yolo_to_fo(float(xc), float(yc),
+                                                                 float(w), float(h))))
+        ns = fo.Sample(filepath=str(img))
+        ns["source"] = source
+        ns["orig_split"] = "unsplit"
+        ns["ground_truth"] = fo.Detections(detections=dets)
+        ns.tags.append(source)
+        if not dets:
+            ns.tags.append("background")
+            stats["background"] += 1
+        stats["images"] += 1
+        stats["boxes"] += len(dets)
+        samples.append(ns)
+    per_source[source] = stats
+
+
+def merge_same_image_sources(samples):
+    """Collapse samples that are the SAME image imported from two sources, unioning their boxes.
+
+    The 200 SDNET 'Missing-*.jpg' images are byte-identical in two places: the read-only
+    datasets/ copy (imported by COCO_SOURCES with EMPTY-HOLE `missing_bolt` boxes) and the
+    dataset_annotation/ working copy (imported by BOLT_YOLO_SOURCES with Gemini fastener-condition
+    boxes). Those two annotation sets are COMPLEMENTARY, not competing - measured over these exact
+    images, 392/437 missing_bolt boxes have IoU < 0.3 against any Gemini box and 378 have zero
+    overlap - so the right result is one sample carrying BOTH. Left un-merged they are two samples
+    of identical pixels, and 02_curate's near-dup pass would drop one at random, silently deleting
+    either the empty-hole labels or the fastener labels for those 200 images.
+    """
+    by_stem = defaultdict(list)
+    for s in samples:
+        by_stem[Path(s.filepath).stem].append(s)
+
+    merged_out, n_merged, n_boxes_rescued = [], 0, 0
+    for stem, group in by_stem.items():
+        if len(group) == 1:
+            merged_out.append(group[0])
+            continue
+        keep, rest = group[0], group[1:]
+        dets = list(keep["ground_truth"].detections)
+        for other in rest:
+            extra = list(other["ground_truth"].detections)
+            dets.extend(extra)
+            n_boxes_rescued += len(extra)
+            for t in other.tags:
+                if t not in keep.tags:
+                    keep.tags.append(t)
+        keep["ground_truth"] = fo.Detections(detections=dets)
+        if dets and "background" in keep.tags:
+            keep.tags.remove("background")
+        n_merged += len(rest)
+        merged_out.append(keep)
+
+    if n_merged:
+        print(f"merged {n_merged} duplicate-image sample(s) across sources "
+              f"({n_boxes_rescued} box(es) unioned onto the kept sample)")
+    return merged_out
+
+
 def main():
     drops = DropLog(reset=True)   # fresh manifest for the whole run
 
@@ -117,9 +196,12 @@ def main():
     # COCO sources (SDNET bolt defects) + no-defect backgrounds
     for source, spec in COCO_SOURCES.items():
         import_coco(source, spec, samples, per_source, drops)
+    for source, ds_dir in BOLT_YOLO_SOURCES.items():
+        import_bolt_yolo(source, ds_dir, samples, per_source)
     for source, rel_dir in BACKGROUND_DIRS.items():
         import_backgrounds(source, rel_dir, samples, per_source)
 
+    samples = merge_same_image_sources(samples)
     dataset.add_samples(samples)
 
     # log excluded folders (image-level drops, with reason)

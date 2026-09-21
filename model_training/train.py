@@ -1,4 +1,4 @@
-"""Train YOLO26 on the merged 11-class inspection dataset — official Ultralytics layout.
+"""Train YOLO26 on the merged 13-class inspection dataset — official Ultralytics layout.
 
 Edit the constants below and run:  python train.py
 
@@ -38,8 +38,12 @@ from ultralytics import YOLO
 # ---- settings (edit these) --------------------------------------
 MODEL   = "yolo26n.pt"     # pretrained base -> training from it is transfer-learning/fine-tuning.
                            #   variants: yolo26n/s/m/l/x.pt (bump for accuracy; drop BATCH if VRAM-limited)
-DATA    = "/home/shamila/datasets/circe_merged/data.yaml"   # WSL-native copy (fast per-epoch reads)
-EPOCHS  = 10               # first shakedown run
+DATA    = "/home/shamila/datasets/circe_merged_v2/data.yaml"  # WSL-native copy (fast per-epoch reads).
+                           # _v2 = 13-class bolt taxonomy. The path is VERSIONED on purpose: resuming
+                           # is keyed on this string, so reusing one path across taxonomies is how you
+                           # resume an 11-class checkpoint into a 13-class head (is_resumable also
+                           # now compares class names, but never rely on one guard alone).
+EPOCHS  = 100              # real run (the Jul 14 10-epoch run was still climbing when it stopped)
 IMGSZ   = 640
 BATCH   = 16               # yolo26n @ 640 fits ~6 GB VRAM; use 8 for yolo26s, or -1 for AutoBatch
 DEVICE  = "0"              # "0" = first GPU, "cpu" = force CPU
@@ -63,12 +67,22 @@ FREEZE      = None         # freeze first N layers for small-data transfer (e.g.
 LR0         = 0.01         # initial learning rate (ONLY used when OPTIMIZER != "auto")
 LRF         = 0.01         # final LR = LR0 * LRF (scheduler end)
 COS_LR      = False        # True = cosine LR schedule (often smoother than the default linear)
-PATIENCE    = 100          # early-stop after this many epochs w/o val improvement (100 = effectively off for 10 ep)
+PATIENCE    = 25           # early-stop after this many epochs w/o val improvement. Deliberately NOT
+                           # equal to EPOCHS: patience==epochs disables early stopping entirely and
+                           # commits the full ~18 h unconditionally.
 OPTIMIZER   = "auto"       # "auto" (recommended; auto-picks optimizer+lr0+momentum) or SGD/Adam/AdamW/...
 SAVE_PERIOD = 1            # 1 = ALSO keep a checkpoint every epoch (epoch0.pt, epoch1.pt, ...) alongside
                            #   best.pt/last.pt (which save every epoch regardless). ~6 MB/epoch for yolo26n;
                            #   raise to 5/10 for very long runs if disk is tight. -1 = only best.pt/last.pt.
 CACHE       = False        # "ram"/"disk" to cache images; keep False when training from the WSL-native copy
+CLS_PW      = 0.5          # class-weight POWER for imbalance: 0.0 = off (Ultralytics default),
+                           # 1.0 = full inverse frequency. Verified wired in the installed
+                           # ultralytics 8.4.93 (utils/loss.py:437 `bce_loss *= self.class_weights`).
+                           # This dataset is ~264:1 (fluid_patch 35,076 boxes vs bolt_defective 133 in merged_v2),
+                           # where 1.0 would put an enormous multiplier on the rarest class. 0.5 is a
+                           # deliberate damped starting point and an ENGINEERING JUDGEMENT, not a
+                           # cited default - if rare-class recall is still poor, this is the first
+                           # knob to sweep, and per-class AP in results.csv is how you judge it.
 WORKERS     = 8            # dataloader worker processes (Ultralytics default)
 SEED        = 0            # fixed seed + deterministic=True below -> reproducible, comparable runs
 # NOTE close_mosaic: Ultralytics default is 10 = disable mosaic aug for the LAST 10 epochs. On a 10-epoch
@@ -104,7 +118,27 @@ def is_resumable(ckpt: Path) -> bool:
     epoch = ck.get("epoch", -1)
     mid_training = ck.get("optimizer") is not None and isinstance(epoch, int) and epoch >= 0
     same_data = str(args.get("data", "")) == str(DATA)
-    return mid_training and same_data
+
+    # TAXONOMY check, not just the path string. `resume=True` makes Ultralytics re-read the run's
+    # own args.yaml, which pins `data:` BY PATH ONLY - so regenerating a different-nc dataset at the
+    # same path and then resuming would load an old-nc checkpoint against a new-nc head. Comparing
+    # the checkpoint's own class names against the target data.yaml closes that hole.
+    ckpt_names = (ck.get("model") and getattr(ck["model"], "names", None)) or {}
+    same_taxonomy = True
+    try:
+        import yaml
+        with open(DATA, encoding="utf-8") as fh:
+            target_names = (yaml.safe_load(fh) or {}).get("names") or {}
+        if ckpt_names and target_names:
+            same_taxonomy = {str(k): v for k, v in dict(ckpt_names).items()} == \
+                            {str(k): v for k, v in dict(target_names).items()}
+            if not same_taxonomy:
+                print(f"[resume] TAXONOMY MISMATCH: checkpoint has {len(ckpt_names)} class(es), "
+                      f"{DATA} has {len(target_names)}. Refusing to resume across taxonomies.")
+    except Exception as e:
+        print(f"[resume] could not compare taxonomies against {DATA}: {e}")
+
+    return mid_training and same_data and same_taxonomy
 
 
 def resume():
@@ -140,7 +174,7 @@ def train_fresh():
         data=DATA, epochs=EPOCHS, imgsz=IMGSZ, batch=BATCH, device=DEVICE,
         project=str(PROJECT), name=RUN_NAME, exist_ok=False,   # official default: auto-increment, never clobber a prior run
         freeze=FREEZE, lr0=LR0, lrf=LRF, cos_lr=COS_LR, patience=PATIENCE,
-        optimizer=OPTIMIZER, save_period=SAVE_PERIOD, cache=CACHE,
+        optimizer=OPTIMIZER, save_period=SAVE_PERIOD, cache=CACHE, cls_pw=CLS_PW,
         workers=WORKERS, seed=SEED, deterministic=True, close_mosaic=CLOSE_MOSAIC,
         plots=True,   # save results.png / PR / F1 / confusion-matrix for later analysis
     )

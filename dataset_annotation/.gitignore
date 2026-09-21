@@ -33,3 +33,8 @@ outputs/
 # gradio_app.py's own log (applog.py) - separate from each stage's own
 # circe_datasets/npu_bolt/run_log.txt, generated, not source
 ui_logs/
+
+# Ad-hoc run logs from run_key_rotation.py / build_dataset_export.py / manual WSL SAM3 runs
+# (04_annotate_with_gemini.py etc. redirected to *.log at this root when run directly) -
+# generated, not source. Each script's own out-dir run_log.txt is already covered above.
+*.log
