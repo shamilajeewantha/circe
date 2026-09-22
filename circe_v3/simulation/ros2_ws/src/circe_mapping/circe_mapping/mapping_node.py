@@ -33,9 +33,20 @@ class Mapping(Node):
         self.declare_parameter("voxel_size", 0.05)
         self.declare_parameter("max_points", 400000)
         self.declare_parameter("recompute_period", 1.0)
+        # PCA neighbourhood half-width in VOXELS: r=1 -> 3x3x3 block (0.15 m at the
+        # default 5 cm voxel). Raise for smoother normals on sparse maps, at cost.
+        self.declare_parameter("normal_radius", 1)
+        # frontier heuristic: empty voxel is frontier if <= this many occupied nbrs
+        self.declare_parameter("max_occ_nbrs", 2)
+        # cap on published frontier points (a depot run produced 1,077,860 of them,
+        # which is a pointless PointCloud2 to build and ship every cycle)
+        self.declare_parameter("max_frontier", 60000)
         self.declare_parameter("frame_id", "vggt_map")
         self.voxel = float(self.get_parameter("voxel_size").value)
         self.max_points = int(self.get_parameter("max_points").value)
+        self.normal_radius = int(self.get_parameter("normal_radius").value)
+        self.max_occ_nbrs = int(self.get_parameter("max_occ_nbrs").value)
+        self.max_frontier = int(self.get_parameter("max_frontier").value)
         self.frame = self.get_parameter("frame_id").value
 
         self.points = np.empty((0, 3), np.float32)
@@ -65,35 +76,106 @@ class Mapping(Node):
             self.points = self.points[sel]
 
     # ------------------------------------------------------------------ #
+    def _neighbour_normals(self, pts: np.ndarray, keys: np.ndarray) -> np.ndarray:
+        """Per-point PCA normal fitted over the surrounding (2r+1)^3 voxel block.
+
+        The cloud is one point per voxel, so a single voxel can never define a plane
+        — the neighbourhood is what carries the surface orientation. Fully vectorised
+        (one pass per neighbour offset + a batched 3x3 eigh) because this runs on the
+        whole map every recompute_period; the previous per-voxel Python loop was
+        already the slowest thing in this node.
+
+        Points whose neighbourhood is still too small to define a plane keep the
+        original (0,0,1) fallback — now a rare isolated-speck case rather than,
+        as it was, every single surfel.
+        """
+        n = len(pts)
+        r = self.normal_radius
+        kk = (keys - keys.min(0)).astype(np.int64)
+        dims = kk.max(0) + 1
+        # pack the 3-D voxel index into one int64 so neighbours are a sorted lookup
+        code = (kk[:, 0] * dims[1] + kk[:, 1]) * dims[2] + kk[:, 2]
+        order = np.argsort(code)
+        code_sorted = code[order]
+
+        s1 = np.zeros((n, 3))       # sum of neighbour coords
+        s2 = np.zeros((n, 6))       # sum of products: xx, yy, zz, xy, xz, yz
+        cnt = np.zeros(n)
+
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                for dz in range(-r, r + 1):
+                    nk = kk + np.array([dx, dy, dz], np.int64)
+                    inside = np.all((nk >= 0) & (nk < dims), axis=1)
+                    ncode = (nk[:, 0] * dims[1] + nk[:, 1]) * dims[2] + nk[:, 2]
+                    pos = np.clip(np.searchsorted(code_sorted, ncode), 0, n - 1)
+                    hit = inside & (code_sorted[pos] == ncode)
+                    centers = np.nonzero(hit)[0]
+                    if len(centers) == 0:
+                        continue
+                    q = pts[order[pos[hit]]].astype(np.float64)
+                    # centers are unique within one offset pass, so += is safe
+                    # (no np.add.at needed, which would be far slower)
+                    s1[centers] += q
+                    s2[centers, 0] += q[:, 0] * q[:, 0]
+                    s2[centers, 1] += q[:, 1] * q[:, 1]
+                    s2[centers, 2] += q[:, 2] * q[:, 2]
+                    s2[centers, 3] += q[:, 0] * q[:, 1]
+                    s2[centers, 4] += q[:, 0] * q[:, 2]
+                    s2[centers, 5] += q[:, 1] * q[:, 2]
+                    cnt[centers] += 1.0
+
+        ok = cnt >= 3
+        normals = np.tile(np.array([0.0, 0.0, 1.0]), (n, 1))
+        if not np.any(ok):
+            return normals
+
+        c = cnt[ok][:, None]
+        mu = s1[ok] / c
+        e = s2[ok] / c
+        cov = np.empty((int(ok.sum()), 3, 3))
+        cov[:, 0, 0] = e[:, 0] - mu[:, 0] * mu[:, 0]
+        cov[:, 1, 1] = e[:, 1] - mu[:, 1] * mu[:, 1]
+        cov[:, 2, 2] = e[:, 2] - mu[:, 2] * mu[:, 2]
+        cov[:, 0, 1] = cov[:, 1, 0] = e[:, 3] - mu[:, 0] * mu[:, 1]
+        cov[:, 0, 2] = cov[:, 2, 0] = e[:, 4] - mu[:, 0] * mu[:, 2]
+        cov[:, 1, 2] = cov[:, 2, 1] = e[:, 5] - mu[:, 1] * mu[:, 2]
+
+        _, V = np.linalg.eigh(cov)          # batched; ascending eigenvalues
+        nn = V[:, :, 0]                     # smallest eigenvector = plane normal
+        ln = np.linalg.norm(nn, axis=1, keepdims=True)
+        normals[ok] = np.divide(nn, ln, out=np.zeros_like(nn), where=ln > 1e-9)
+        # a degenerate fit (collinear neighbours) yields a zero row — keep it upright
+        degenerate = np.linalg.norm(normals, axis=1) < 1e-6
+        normals[degenerate] = np.array([0.0, 0.0, 1.0])
+        return normals
+
+    # ------------------------------------------------------------------ #
     def _recompute(self):
         if len(self.points) < 50:
             return
         stamp = self.get_clock().now().to_msg()
         v = self.voxel
         keys = np.floor(self.points / v).astype(np.int64)
-        occ = set(map(tuple, keys))                        # occupied voxel keys
+        # (no python set of voxel keys any more — _frontier_cells works on the
+        # int64-coded arrays directly; building a 400k-tuple set every cycle was
+        # pure overhead once the frontier scan stopped needing it)
 
-        # --- surfels: one per occupied voxel, PCA normal from k-NN points ---
-        centroids, normals = [], []
-        # bucket points by voxel for local PCA
-        order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
-        ks = keys[order]; ps = self.points[order]
-        starts = np.concatenate([[0], np.where(np.any(np.diff(ks, axis=0) != 0, axis=1))[0] + 1, [len(ks)]])
-        for a, b in zip(starts[:-1], starts[1:]):
-            pts = ps[a:b]
-            c = pts.mean(0)
-            if len(pts) >= 3:
-                cov = np.cov((pts - c).T)
-                w, V = np.linalg.eigh(cov)
-                n = V[:, 0]                                 # smallest eigenvector
-            else:
-                n = np.array([0, 0, 1], np.float32)
-            # orient toward the rover (observed side, §7A.2)
-            if np.dot(self.rover_pos - c, n) < 0:
-                n = -n
-            centroids.append(c); normals.append(n)
-        centroids = np.asarray(centroids, np.float32)
-        normals = np.asarray(normals, np.float32)
+        # --- surfels: one per occupied voxel, PCA normal over a voxel NEIGHBOURHOOD ---
+        # This used to bucket points by voxel and PCA within the bucket. That could
+        # never work: _cloud() voxel_downsample()s to exactly ONE point per voxel, so
+        # every bucket had len(pts)==1, the `len(pts) >= 3` test was never true, and
+        # EVERY surfel fell through to the (0,0,1) fallback. Measured on a live 25,674
+        # surfel map: 100% had |n_z| == 1.0000, so coverage_node classified all of them
+        # as floor (|n_z| > floor_normal_cos) and published gaps=0 forever — the whole
+        # detection layer (§7A.3/7A.5/7A.6) was silently dead and explore only ever hit
+        # its frontier fallback. Fit the plane over the surrounding voxels instead.
+        centroids = self.points
+        normals = self._neighbour_normals(centroids, keys)
+        # orient toward the rover (observed side, §7A.2)
+        flip = ((self.rover_pos - centroids) * normals).sum(1) < 0
+        normals[flip] *= -1.0
+        normals = normals.astype(np.float32)
 
         if len(centroids):
             self.pub_surfels.publish(make_cloud(
@@ -104,25 +186,58 @@ class Mapping(Node):
                                             extra={"rgb": pack_rgb(rgb)}))
 
         # --- frontier: empty voxels adjacent to occupied at the map boundary ---
-        frontier = []
-        nbrs = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
-        checked = set()
-        for k in occ:
-            for d in nbrs:
-                e = (k[0] + d[0], k[1] + d[1], k[2] + d[2])
-                if e in occ or e in checked:
-                    continue
-                checked.add(e)
-                # boundary heuristic: an empty voxel touching occupied but mostly
-                # surrounded by empty (few occupied neighbors) is a frontier
-                occn = sum((e[0] + dd[0], e[1] + dd[1], e[2] + dd[2]) in occ for dd in nbrs)
-                if occn <= 2:
-                    frontier.append([(e[0] + 0.5) * v, (e[1] + 0.5) * v, (e[2] + 0.5) * v])
-        if frontier:
-            self.pub_frontier.publish(make_cloud(np.asarray(frontier, np.float32), self.frame, stamp))
+        # Same boundary heuristic as before (an empty voxel touching occupied but
+        # with <=2 occupied neighbours), but vectorised. The original nested Python
+        # loop did ~#voxels x 6 tuple-builds and set lookups, plus 6 more per
+        # candidate: at 400k occupied voxels that is >10M set operations and this
+        # recompute measured ~70s against a 1.0s timer, which starved coverage and
+        # explore of fresh data for over a minute at a time.
+        frontier = self._frontier_cells(keys, v)
+        if len(frontier):
+            self.pub_frontier.publish(make_cloud(frontier, self.frame, stamp))
         self.get_logger().info(
             f"[map] pts={len(self.points)} surfels={len(centroids)} frontier={len(frontier)}",
             throttle_duration_sec=5.0)
+
+    # ------------------------------------------------------------------ #
+    def _frontier_cells(self, keys: np.ndarray, v: float) -> np.ndarray:
+        """Empty voxels touching occupied space with <= max_occ_nbrs occupied
+        neighbours (the map's outer boundary), as world-frame centres."""
+        nbr = np.array([(1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                        (0, -1, 0), (0, 0, 1), (0, 0, -1)], np.int64)
+        occ_keys = np.unique(keys, axis=0)
+        lo = occ_keys.min(0) - 1
+        kk = occ_keys - lo
+        dims = kk.max(0) + 3                     # +2 margin for the -1/+1 shells
+
+        def code(a):
+            return (a[:, 0] * dims[1] + a[:, 1]) * dims[2] + a[:, 2]
+
+        occ_code = np.sort(code(kk))
+
+        def is_occ(a):
+            inside = np.all((a >= 0) & (a < dims), axis=1)
+            c = code(a)
+            pos = np.clip(np.searchsorted(occ_code, c), 0, len(occ_code) - 1)
+            return inside & (occ_code[pos] == c)
+
+        # candidate empty neighbours of occupied voxels
+        cand = np.unique((kk[:, None, :] + nbr[None, :, :]).reshape(-1, 3), axis=0)
+        cand = cand[~is_occ(cand)]
+        if len(cand) == 0:
+            return np.empty((0, 3), np.float32)
+
+        occ_n = np.zeros(len(cand), np.int32)
+        for d in nbr:
+            occ_n += is_occ(cand + d).astype(np.int32)
+        cand = cand[occ_n <= self.max_occ_nbrs]
+        if len(cand) == 0:
+            return np.empty((0, 3), np.float32)
+
+        if self.max_frontier and len(cand) > self.max_frontier:
+            sel = np.linspace(0, len(cand) - 1, self.max_frontier).astype(int)
+            cand = cand[sel]
+        return ((cand + lo).astype(np.float32) + 0.5) * v
 
 
 def main(args=None):

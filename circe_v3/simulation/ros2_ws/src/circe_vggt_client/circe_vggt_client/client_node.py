@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import io
 import threading
+import time
 
 import numpy as np
 import requests
@@ -57,6 +58,7 @@ class VggtClient(Node):
         self._after_submap = -1
         self._known_loops = 0
         self._server_session_id = None     # SLAM-side run id; see _poll_map
+        self._session_attempts = 6         # 503 retries at startup; see _start_slam_session
         self._session = requests.Session()
         self._start_slam_session()
 
@@ -73,21 +75,37 @@ class VggtClient(Node):
         """Tell the SLAM host a new run is starting, so it archives the previous
         map instead of fusing this sim's scene into it. This node starts once per
         sim launch, so exactly one new session per run — which is the intent."""
-        try:
-            r = self._session.post(f"{self.url}/session",
-                                   json={"label": "circe_sim", "reset": True},
-                                   timeout=10.0)
-            r.raise_for_status()
-            info = r.json()
-            self._server_session_id = info.get("session_id")
-            self.get_logger().info(
-                f"SLAM session {self._server_session_id} started "
-                f"(archived run: {info.get('archived_run', {}).get('session_id')})")
-        except requests.RequestException as e:
-            # Non-fatal: the rover can still map, it just shares whatever run the
-            # server already had. Loud, because that silently means a stale map.
-            self.get_logger().error(
-                f"POST /session failed ({e}) — SLAM may append to a PREVIOUS run's map")
+        # The server refuses (503) while a submap is in flight rather than making us
+        # wait past our own timeout, so a couple of retries is the normal path, not
+        # an error path — a big optimisation can occupy it for tens of seconds.
+        for attempt in range(1, self._session_attempts + 1):
+            try:
+                r = self._session.post(f"{self.url}/session",
+                                       json={"label": "circe_sim", "reset": True},
+                                       timeout=20.0)
+                if r.status_code == 503:
+                    wait = float(r.headers.get("Retry-After", 5))
+                    self.get_logger().warn(
+                        f"[{attempt}/{self._session_attempts}] SLAM busy, no reset yet; "
+                        f"retrying in {wait:.0f}s")
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                info = r.json()
+                self._server_session_id = info.get("session_id")
+                self.get_logger().info(
+                    f"SLAM session {self._server_session_id} started "
+                    f"(archived run: {info.get('archived_run', {}).get('session_id')})")
+                return
+            except requests.RequestException as e:
+                self.get_logger().warn(
+                    f"[{attempt}/{self._session_attempts}] POST /session failed: {e}")
+                time.sleep(2.0)
+        # Every attempt failed. Say plainly what that means rather than quietly
+        # fusing this run's scene into whatever map the server already holds.
+        self.get_logger().error(
+            "POST /session never succeeded — this run will APPEND to the server's "
+            "existing map. Restart the client once SLAM is idle for a clean session.")
 
     # --- frames up -------------------------------------------------------
     def _on_image(self, msg: Image) -> None:

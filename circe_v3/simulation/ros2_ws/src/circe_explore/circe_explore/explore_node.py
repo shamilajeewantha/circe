@@ -35,22 +35,34 @@ def _look_at_optical(c, target):
     return np.column_stack([x, y, z])
 
 
-def _cluster(points, radius):
-    """Cheap greedy euclidean clustering → list of index arrays."""
+def _cluster(points, radius, max_clusters: int = 0):
+    """Grid-bucket euclidean clustering → list of index arrays. O(n).
+
+    This was a greedy sweep that, for every not-yet-used point, computed the
+    distance to EVERY other point — O(n^2). That was survivable only while the
+    detection layer was broken and fed it zero gaps. Once surfel normals were
+    fixed and real gaps appeared (329k of them on a depot run) it became ~1e11
+    distance evaluations: _plan() never returned, /circe/goal_station was never
+    published, and the rover sat in IDLE indefinitely with explore pinned at 92%
+    CPU. Bucketing on a grid of the cluster radius is O(n) and yields what this
+    actually needs — spatially coherent groups of neighbouring gap surfels.
+
+    ``max_clusters`` keeps only the largest N, because _plan() runs the full
+    §7A.3 adequacy test against every surfel per candidate; an unbounded cluster
+    count is its own way of never returning.
+    """
     if len(points) == 0:
         return []
-    unused = np.ones(len(points), bool)
-    clusters = []
-    r2 = radius * radius
-    for i in range(len(points)):
-        if not unused[i]:
-            continue
-        seed = points[i]
-        d2 = ((points - seed) ** 2).sum(1)
-        members = np.where(unused & (d2 < r2 * 9))[0]   # coarse ball
-        unused[members] = False
-        clusters.append(members)
-    return clusters
+    cell = max(float(radius) * 2.0, 1e-6)
+    keys = np.floor(np.asarray(points, np.float64) / cell).astype(np.int64)
+    _, inv, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+    inv = np.ravel(inv)
+    order = np.argsort(inv, kind="stable")
+    groups = np.split(order, np.cumsum(counts)[:-1])
+    if max_clusters and len(groups) > max_clusters:
+        groups.sort(key=len, reverse=True)
+        groups = groups[:max_clusters]
+    return groups
 
 
 class Explore(Node):
@@ -68,6 +80,9 @@ class Explore(Node):
         self.declare_parameter("F_MIN", 6.0)
         self.declare_parameter("COS_INCIDENCE_MIN", 0.5)
         self.declare_parameter("period", 2.0)
+        # Cap on gap clusters scored per plan tick. _adequate_count() is O(#surfels)
+        # per candidate, so this bounds the tick at max_clusters x #surfels.
+        self.declare_parameter("max_clusters", 40)
         self.declare_parameter("frame_id", "vggt_map")
         g = self.get_parameter
         self.H_CAM = float(g("H_CAM").value); self.d_h = float(g("d_h").value)
@@ -75,6 +90,7 @@ class Explore(Node):
         self.fx = float(g("fx").value); self.cx = float(g("cx").value); self.cy = float(g("cy").value)
         self.W = int(g("width").value); self.H = int(g("height").value)
         self.F_MIN = float(g("F_MIN").value); self.COS_MIN = float(g("COS_INCIDENCE_MIN").value)
+        self.max_clusters = int(g("max_clusters").value)
         self.frame = g("frame_id").value
 
         self.gaps = np.empty((0, 3), np.float32)
@@ -129,7 +145,7 @@ class Explore(Node):
     def _plan(self):
         best = None                                # (score, c_xy, yaw)
         # --- detection-gap viewpoints (§7A.5/6) ---
-        for members in _cluster(self.gaps, self.R_CLUSTER):
+        for members in _cluster(self.gaps, self.R_CLUSTER, self.max_clusters):
             pts = self.gaps[members]
             C = pts.mean(0)
             nbar = self._mean_normal(C)

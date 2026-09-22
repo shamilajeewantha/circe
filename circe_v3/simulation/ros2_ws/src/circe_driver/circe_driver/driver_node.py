@@ -43,6 +43,9 @@ class Driver(Node):
         p("cam_forward", 0.18); p("cam_height", 0.18)
         p("ring_steps", 8); p("settle_ticks", 10)
         p("frame_id", "vggt_map")
+        # stuck detection: commanding motion this long with no pose change => wedged
+        p("stuck_secs", 6.0); p("unstick_secs", 1.5)
+        p("stuck_pos_eps", 0.01); p("stuck_yaw_eps", 0.02)
         g = self.get_parameter
         self.kp_ang, self.kp_lin = g("kp_ang").value, g("kp_lin").value
         self.max_ang, self.max_lin = g("max_ang").value, g("max_lin").value
@@ -59,6 +62,13 @@ class Driver(Node):
         self.done = False
         self.ring_i = 0; self.ring_wait = 0; self.ring_start_yaw = 0.0
         self.ring_views = []
+        self.stuck_secs = float(g("stuck_secs").value)
+        self.unstick_secs = float(g("unstick_secs").value)
+        self.stuck_pos_eps = float(g("stuck_pos_eps").value)
+        self.stuck_yaw_eps = float(g("stuck_yaw_eps").value)
+        self.stuck_since = None          # when we first saw no progress
+        self.last_progress = None        # (xy, yaw) at the last real movement
+        self.unstick_until = 0.0         # reverse out of the wedge until this time
 
         self.create_subscription(Odometry, "/circe/pose_fused", self._pose, 10)
         self.create_subscription(Odometry, "/circe/goal_station", self._goal, 10)
@@ -134,8 +144,76 @@ class Driver(Node):
         if blocked:                                 # safety backstop, always last word
             cmd.linear.x = min(cmd.linear.x, 0.0)
 
+        cmd = self._stuck_guard(cmd, blocked)
+
         self.pub_cmd.publish(cmd)
         self.pub_state.publish(String(data=self.state))
+
+    def _stuck_guard(self, cmd: Twist, blocked: bool = False) -> Twist:
+        """Abandon a goal the rover physically cannot reach.
+
+        Observed in sim: the rover wedged into world geometry and sat commanding
+        angular.z = -0.8 (saturated) for minutes with its pose identical to 10
+        decimal places. Nothing broke out of it — the heading error never shrank,
+        so ROTATE_TO_HEADING never completed, the rover never moved, the camera
+        never changed, and with no new parallax SLAM stopped producing keyframes
+        entirely (keyframes froze at 98, submaps at 17). One wedge silently ends
+        the mission.
+
+        So: if we are commanding motion but the fused pose has not actually moved
+        for stuck_secs, back out briefly, then drop the goal so circe_explore
+        plans a different station.
+        """
+        # A ToF halt counts as "trying" even though we publish zero velocity.
+        # DRIVE's `elif blocked: pass` waits for a clearance that can never come:
+        # zero velocity means the rover cannot back away from whatever it is
+        # nose-to, so the ToF stays blocked and the mission stalls forever.
+        # Observed live: state DRIVE, cmd_vel all zeros, pose frozen indefinitely.
+        stalled_on_tof = blocked and self.goal is not None and self.state != "IDLE"
+        commanding = (abs(cmd.linear.x) > 1e-3 or abs(cmd.angular.z) > 1e-3
+                      or stalled_on_tof)
+        now = self.get_clock().now().nanoseconds * 1e-9
+        xy, yaw = self.pose
+
+        if self.unstick_until > now:                # reversing out of the wedge
+            out = Twist()
+            out.linear.x = -abs(self.max_lin) * 0.6
+            return out
+
+        if not commanding:
+            self.stuck_since = None
+            self.last_progress = (xy.copy(), yaw)
+            return cmd
+
+        if self.last_progress is None:
+            self.last_progress = (xy.copy(), yaw)
+            self.stuck_since = now
+            return cmd
+
+        moved = float(np.linalg.norm(xy - self.last_progress[0]))
+        turned = abs(_wrap(yaw - self.last_progress[1]))
+        if moved > self.stuck_pos_eps or turned > self.stuck_yaw_eps:
+            self.last_progress = (xy.copy(), yaw)   # real progress, reset the clock
+            self.stuck_since = now
+            return cmd
+
+        if self.stuck_since is None:
+            self.stuck_since = now
+            return cmd
+
+        if now - self.stuck_since >= self.stuck_secs:
+            self.get_logger().warn(
+                f"[driver] STUCK in {self.state} for {now - self.stuck_since:.1f}s "
+                f"(moved {moved:.4f} turned {turned:.4f}) - reversing and dropping goal")
+            self.unstick_until = now + self.unstick_secs
+            self.stuck_since = None
+            self.last_progress = None
+            self.goal = None                        # let explore pick another station
+            self.state = "IDLE"
+            out = Twist()
+            out.linear.x = -abs(self.max_lin) * 0.6
+            return out
+        return cmd
 
     def _ring_step(self, cmd: Twist):
         xy, yaw = self.pose

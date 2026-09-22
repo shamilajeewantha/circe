@@ -162,6 +162,17 @@ def load_model(device: str) -> VGGT:
     return model
 
 
+# How long POST /session waits for an in-flight submap before giving up. Must stay
+# comfortably BELOW the client's read timeout so the caller gets a real answer
+# ("busy, nothing changed") instead of a silent late reset. circe_vggt_client uses
+# 10s, so this leaves it room to see the 503.
+_RESET_LOCK_WAIT_S = 6.0
+
+
+class SessionBusy(RuntimeError):
+    """Raised when a reset cannot safely run right now. Surfaces as HTTP 503."""
+
+
 def _session_keyframe_dir(session_id: int) -> str:
     """Per-session keyframe folder. Sessions restart frame numbering at 1, so a
     single shared folder would have each new run overwrite the previous run's
@@ -200,9 +211,19 @@ def _start_new_session(label: Optional[str] = None) -> dict:
     # Block until any in-flight submap inference finishes. Without this, a
     # _process_submap already running would call add_points() AFTER we swap in
     # the empty map — silently seeding the new run with the old run's geometry.
-    acquired = solver_lock.acquire(timeout=180.0)
+    #
+    # The wait is SHORT and failure is reported, never silently deferred: this
+    # originally waited 180s, far longer than any client read timeout. A client
+    # calling POST /session while a big submap was optimising (measured: 46
+    # submaps / 21 loops held both locks for minutes) timed out at 10s, gave up,
+    # and started streaming — and then the reset landed anyway, wiping the map
+    # mid-run under a client that believed its session had never started. A reset
+    # that arrives after the caller stopped waiting is worse than no reset.
+    acquired = solver_lock.acquire(timeout=_RESET_LOCK_WAIT_S)
     if not acquired:
-        log.warning("new session: submap still in flight after 180s; resetting anyway")
+        raise SessionBusy(
+            f"SLAM busy (submap in flight) — no reset performed after "
+            f"{_RESET_LOCK_WAIT_S:.0f}s. Retry; the map is untouched.")
     try:
         with data_lock:
             now = time.time()
@@ -422,7 +443,14 @@ def session(payload: dict):
                 "submap_size": _cfg.submap_size,
                 "note": "config only; current run left intact (relative scale)"}
 
-    archived = _start_new_session(label=payload.get("label"))
+    try:
+        archived = _start_new_session(label=payload.get("label"))
+    except SessionBusy as e:
+        # 503 + Retry-After: the map is untouched, the caller can simply try again.
+        log.warning("POST /session refused: %s", e)
+        return JSONResponse({"ok": False, "reset": False, "busy": True,
+                             "session_id": _session_id, "error": str(e)},
+                            status_code=503, headers={"Retry-After": "5"})
     return {"ok": True, "reset": True, "session_id": _session_id,
             "submap_size": _cfg.submap_size, "archived_run": archived,
             "note": "fresh empty map; relative scale"}

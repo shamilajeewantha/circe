@@ -23,14 +23,22 @@
 
 /circe_mapping:
   ros__parameters:
-    voxel_size: 0.05
-    max_points: 400000
+    # 0.05 was unrunnable on the depot world: it produced 400k+ occupied voxels
+    # (hitting max_points) and 1,077,860 frontier cells, and _recompute measured
+    # ~70s against this 1.0s timer — coverage and explore went a minute at a time
+    # without fresh data. Voxel count scales ~1/v^3, so 0.10 cuts it ~8x.
+    # MUST match /circe_coverage's voxel_size (it keys surfel state by this grid).
+    voxel_size: 0.10
+    max_points: 200000
     recompute_period: 1.0
+    normal_radius: 1          # PCA neighbourhood = 3x3x3 voxels (0.30 m here)
+    max_occ_nbrs: 2
+    max_frontier: 60000
     frame_id: "vggt_map"
 
 /circe_coverage:
   ros__parameters:
-    voxel_size: 0.05
+    voxel_size: 0.10    # MUST match /circe_mapping's voxel_size (keys surfel state)
     fx: 1055.0
     fy: 1055.0
     cx: 640.0
@@ -56,6 +64,8 @@
     F_MIN: 6.0
     COS_INCIDENCE_MIN: 0.5
     period: 2.0
+    # gap clusters scored per tick; _adequate_count is O(#surfels) per candidate
+    max_clusters: 40
     frame_id: "vggt_map"
 
 /circe_driver:
