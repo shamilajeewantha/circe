@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import logging
 import os
@@ -45,6 +46,39 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
+
+# --------------------------------------------------------------------------- #
+# Version + running-source identity.
+#
+# Python does not hot-reload: editing this file does NOTHING to an already
+# running server, and that has burned us — a fix was "applied" on disk while the
+# live process kept executing the old code path, and we only noticed by watching
+# the old buggy behaviour happen (a session reset firing minutes late). So
+# /status reports which build is actually SERVING, not which build is on disk:
+#
+#   version          -> bump by hand on any wire-visible change
+#   src_sha          -> sha256 of this file as read AT STARTUP (the running code)
+#   src_sha_on_disk  -> sha256 of this file right now
+#   stale            -> the two differ => the file changed since launch,
+#                       i.e. RESTART REQUIRED for the edit to take effect
+# --------------------------------------------------------------------------- #
+SERVER_VERSION = "1.3.0"      # sessions + fail-fast /session (503) + stage counters
+
+
+def _src_sha() -> str:
+    """sha256 (first 12 hex) of this source file, or 'unknown' if unreadable."""
+    try:
+        with open(os.path.abspath(__file__), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:12]
+    except OSError:
+        return "unknown"
+
+
+# Captured at import time on purpose: this is the fingerprint of the code the
+# interpreter actually loaded. Computing it per-request would re-read whatever is
+# on disk now and could never reveal a stale process.
+_SRC_SHA_AT_START = _src_sha()
+_PROCESS_STARTED_AT = time.time()
 
 import cv2
 import numpy as np
@@ -560,7 +594,14 @@ def status():
     # False if slam_worker hasn't looped in >5s (it loops at least once/sec via
     # _camera.capture(timeout=1.0), so a stalled/dead thread shows up within 5s).
     alive = _worker_started.is_set() and (time.monotonic() - _worker_last_beat) < 5.0
-    return {"worker_started": _worker_started.is_set(), "worker_alive": alive,
+    on_disk = _src_sha()
+    return {"version": SERVER_VERSION,
+            "src_sha": _SRC_SHA_AT_START,        # what is actually RUNNING
+            "src_sha_on_disk": on_disk,          # what is in the file now
+            "stale": on_disk != _SRC_SHA_AT_START and on_disk != "unknown",
+            "pid": os.getpid(),
+            "uptime_s": round(time.time() - _PROCESS_STARTED_AT, 1),
+            "worker_started": _worker_started.is_set(), "worker_alive": alive,
             "worker_last_error": _worker_last_error,
             "session_id": _session_id, "session_label": _session_label,
             "past_runs": len(_past_runs),
@@ -603,6 +644,8 @@ def main() -> None:
     _setup_logging(args.log_dir, debug=True)
     app.debug = True
 
+    log.info("slam_server v%s (src_sha=%s pid=%d) — /status reports `stale` if this "
+             "file changes after launch", SERVER_VERSION, _SRC_SHA_AT_START, os.getpid())
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log.info("device=%s; loading VGGT...", device)
     _model = load_model(device)
