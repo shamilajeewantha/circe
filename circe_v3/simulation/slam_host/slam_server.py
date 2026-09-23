@@ -42,6 +42,7 @@ import hashlib
 import io
 import logging
 import os
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
@@ -214,6 +215,147 @@ def _session_keyframe_dir(session_id: int) -> str:
     return os.path.join(_cfg.keyframe_folder, f"session_{session_id:03d}")
 
 
+# --------------------------------------------------------------------------- #
+# Keyframe cache budget.
+#
+# slam_worker writes one PNG per keyframe and nothing ever removed them: the
+# folder reached 1.02 GB / 48,994 files across seven stale sessions while D: had
+# 9.25 GB free. A full disk would take down the server mid-run, so the cache is
+# now bounded.
+#
+# Eviction order is OLDEST-FIRST BY WRITE TIME, deliberately not by session
+# number: _session_id restarts at 0 on every relaunch, so session_006 can be
+# (and was) older than session_001. Sorting by name would have evicted the
+# newest run first.
+# --------------------------------------------------------------------------- #
+_CACHE_LIMIT_BYTES = 2 * 1024 ** 3          # 2 GiB, whole keyframe_folder
+_CACHE_CHECK_PERIOD_S = 60.0                # a full walk is ~49k stats; don't do it per frame
+_cache_last_check = 0.0
+
+
+def _dir_size(path: str) -> int:
+    """Bytes under ``path``. Files vanishing mid-walk (the active session is
+    being written to while we walk it) are skipped, not raised."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def _dir_mtime(path: str) -> float:
+    """Newest file mtime under ``path`` — when this session was last written.
+    Falls back to the directory's own mtime for an empty session folder."""
+    newest = 0.0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                newest = max(newest, os.path.getmtime(os.path.join(root, f)))
+            except OSError:
+                pass
+    if newest == 0.0:
+        try:
+            newest = os.path.getmtime(path)
+        except OSError:
+            pass
+    return newest
+
+
+def _enforce_keyframe_cache_budget(active_session_id: int) -> None:
+    """Keep ``keyframe_folder`` under _CACHE_LIMIT_BYTES.
+
+    Order: loose root-level frame_*.png first (orphans from before per-session
+    folders existed, nothing references them), then whole session folders
+    oldest-first by write time.
+
+    The ACTIVE session is never a candidate — its PNGs are the paths sitting in
+    slam_worker's ``subset`` list and in any in-flight _process_submap call, so
+    deleting it would pull files out from under a running submap.
+    """
+    root = _cfg.keyframe_folder
+    if not os.path.isdir(root):
+        return
+
+    total = _dir_size(root)
+    if total <= _CACHE_LIMIT_BYTES:
+        return
+
+    log.warning("keyframe cache %.2f GB exceeds %.2f GB budget - evicting",
+                total / 1024 ** 3, _CACHE_LIMIT_BYTES / 1024 ** 3)
+
+    # --- pass 1: loose frame_*.png at the root -------------------------------
+    loose, loose_bytes = [], 0
+    try:
+        for name in os.listdir(root):
+            full = os.path.join(root, name)
+            if os.path.isfile(full) and name.startswith("frame_") and name.endswith(".png"):
+                loose.append(full)
+                try:
+                    loose_bytes += os.path.getsize(full)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    if loose:
+        removed = 0
+        for i, full in enumerate(loose, 1):
+            try:
+                os.remove(full)
+                removed += 1
+            except OSError as e:
+                log.warning("  could not remove %s: %s", os.path.basename(full), e)
+            if i % 500 == 0 or i == len(loose):
+                log.info("  [%d/%d] purging loose root keyframes", i, len(loose))
+        total -= loose_bytes
+        log.info("evicted %d loose root keyframes (%.0f MB); cache now %.2f GB",
+                 removed, loose_bytes / 1024 ** 2, total / 1024 ** 3)
+        if total <= _CACHE_LIMIT_BYTES:
+            return
+
+    # --- pass 2: whole session folders, oldest write time first --------------
+    active = os.path.abspath(_session_keyframe_dir(active_session_id))
+    cands = []
+    try:
+        for name in sorted(os.listdir(root)):
+            full = os.path.join(root, name)
+            if not (os.path.isdir(full) and name.startswith("session_")):
+                continue
+            if os.path.abspath(full) == active:
+                continue                     # never the run in progress
+            cands.append((_dir_mtime(full), full, _dir_size(full)))
+    except OSError:
+        return
+
+    if not cands:
+        log.warning("cache still %.2f GB over budget but only the ACTIVE session "
+                    "remains - not touching it; free space on the host instead",
+                    total / 1024 ** 3)
+        return
+
+    cands.sort(key=lambda c: c[0])           # oldest last-write first
+    for n, (mtime, full, size) in enumerate(cands, 1):
+        if total <= _CACHE_LIMIT_BYTES:
+            break
+        stamp = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        try:
+            shutil.rmtree(full)
+            total -= size
+            log.info("  [%d/%d] evicted %s (last written %s, %.0f MB); cache now %.2f GB",
+                     n, len(cands), os.path.basename(full), stamp,
+                     size / 1024 ** 2, total / 1024 ** 3)
+        except OSError as e:
+            log.warning("  [%d/%d] could not evict %s: %s",
+                        n, len(cands), os.path.basename(full), e)
+
+    if total > _CACHE_LIMIT_BYTES:
+        log.warning("cache still %.2f GB after evicting every inactive session - "
+                    "the ACTIVE session alone exceeds the budget", total / 1024 ** 3)
+
+
 def _start_new_session(label: Optional[str] = None) -> dict:
     """End the current run and start a fresh, empty map. Returns the new session.
 
@@ -361,6 +503,7 @@ def slam_worker() -> None:
 
     global _worker_last_beat, _worker_last_error
     global _frames_seen, _keyframes_pending, _keyframes_total
+    global _cache_last_check
     while not _stop.is_set():
         _worker_last_beat = time.monotonic()
         try:
@@ -396,6 +539,17 @@ def slam_worker() -> None:
             if frame_count % 25 == 0:      # mandatory progress signal for a loop with no fixed N
                 log.info("[session %d][frame %d] keyframes_pending=%d/%d camera=%s",
                           _session_id, frame_count, len(subset), target, _camera.stats())
+
+            # Bound the on-disk keyframe cache. Throttled: a full walk stats every
+            # file in the folder, which is far too expensive to do per frame.
+            now = time.monotonic()
+            if now - _cache_last_check >= _CACHE_CHECK_PERIOD_S:
+                _cache_last_check = now
+                try:
+                    _enforce_keyframe_cache_budget(_session_id)
+                except Exception:
+                    # Cleanup is housekeeping - it must never take the SLAM loop down.
+                    log.exception("keyframe cache cleanup failed (continuing)")
 
             if len(subset) >= target:
                 if solver_lock.acquire(blocking=False):
