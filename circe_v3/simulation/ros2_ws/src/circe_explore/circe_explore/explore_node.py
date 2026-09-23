@@ -20,7 +20,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, Header
+from std_msgs.msg import Bool, Float64, Header
 
 from circe_common.geom import read_points, R_to_quat
 
@@ -83,6 +83,9 @@ class Explore(Node):
         # Cap on gap clusters scored per plan tick. _adequate_count() is O(#surfels)
         # per candidate, so this bounds the tick at max_clusters x #surfels.
         self.declare_parameter("max_clusters", 40)
+        # MUST match /circe_mapping + /circe_coverage voxel_size: the surfel
+        # footprint gate below is computed from it.
+        self.declare_parameter("voxel_size", 0.05)
         self.declare_parameter("frame_id", "vggt_map")
         g = self.get_parameter
         self.H_CAM = float(g("H_CAM").value); self.d_h = float(g("d_h").value)
@@ -91,6 +94,7 @@ class Explore(Node):
         self.W = int(g("width").value); self.H = int(g("height").value)
         self.F_MIN = float(g("F_MIN").value); self.COS_MIN = float(g("COS_INCIDENCE_MIN").value)
         self.max_clusters = int(g("max_clusters").value)
+        self.voxel = float(g("voxel_size").value)
         self.frame = g("frame_id").value
 
         self.gaps = np.empty((0, 3), np.float32)
@@ -100,6 +104,10 @@ class Explore(Node):
         self.rover = np.zeros(3); self.rover_yaw = 0.0
         self._map_seen = False   # has mapping produced ANY data yet? (cold-start guard, see _plan)
 
+        # track circe_mapping's adaptive grid: _adequate_count's footprint gate is
+        # computed from it, and a mismatch makes this node's gain estimate disagree
+        # with the adequacy test coverage actually applies.
+        self.create_subscription(Float64, "/circe/voxel_size", self._voxel, 10)
         self.create_subscription(PointCloud2, "/circe/detection_gaps", self._gaps, 1)
         self.create_subscription(PointCloud2, "/circe/frontiers", self._frontier, 1)
         self.create_subscription(PointCloud2, "/circe/surfels", self._surfels, 1)
@@ -107,6 +115,12 @@ class Explore(Node):
         self.pub_goal = self.create_publisher(Odometry, "/circe/goal_station", 10)
         self.pub_done = self.create_publisher(Bool, "/circe/done", 1)
         self.create_timer(float(g("period").value), self._plan)
+
+    def _voxel(self, m: Float64):
+        v = float(m.data)
+        if v > 0 and abs(v - self.voxel) > 1e-9:
+            self.get_logger().info(f"[explore] voxel {self.voxel:.5f} -> {v:.5f}")
+            self.voxel = v
 
     def _gaps(self, m): self.gaps = read_points(m, ("x", "y", "z"))
     def _frontier(self, m):
@@ -136,7 +150,12 @@ class Explore(Node):
         u = self.fx * pc[:, 0] / np.where(infront, pc[:, 2], 1) + self.cx
         v = self.fx * pc[:, 1] / np.where(infront, pc[:, 2], 1) + self.cy
         infov = infront & (u >= 0) & (u < self.W) & (v >= 0) & (v < self.H)
-        footprint = self.fx * 0.05 / depth        # voxel≈0.05; footprint gate
+        # Surfel footprint in pixels. MUST use the real voxel size: this was
+        # hardcoded to 0.05 while circe_mapping/circe_coverage run at 0.10, which
+        # halves every gain estimate here relative to the adequacy test coverage
+        # actually applies — explore would under-rate (and discard, gain<=0)
+        # viewpoints that do satisfy §7A.3.
+        footprint = self.fx * self.voxel / depth
         ray = rel / depth[:, None]
         cos_inc = -(ray * self.surf_n).sum(1)
         ok = infov & (footprint >= self.F_MIN) & (cos_inc >= self.COS_MIN)
@@ -201,6 +220,12 @@ class Explore(Node):
         return n / nn if nn > 1e-6 else None
 
     def _emit(self, c, yaw):
+        # Clear any earlier DONE. circe_driver latches self.done and its _tick
+        # checks `if self.done` before everything else, with nothing that ever
+        # clears it — so a single premature DONE (e.g. one tick where every gap
+        # scored gain<=0 and the frontier had not been republished yet) ends the
+        # mission for good, even with tens of thousands of gaps still open.
+        self.pub_done.publish(Bool(data=False))
         od = Odometry()
         od.header = Header(stamp=self.get_clock().now().to_msg(), frame_id=self.frame)
         od.pose.pose.position.x, od.pose.pose.position.y, od.pose.pose.position.z = \

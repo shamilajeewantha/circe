@@ -23,6 +23,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Float64
 
 from circe_common.geom import read_points, make_cloud, pack_rgb, voxel_downsample
 
@@ -41,12 +42,23 @@ class Mapping(Node):
         # cap on published frontier points (a depot run produced 1,077,860 of them,
         # which is a pointless PointCloud2 to build and ship every cycle)
         self.declare_parameter("max_frontier", 60000)
+        # Relative-scale safety: size the grid from the map extent instead of a
+        # fixed absolute value (see _adapt_voxel). target_cells is the real knob.
+        self.declare_parameter("adaptive_voxel", True)
+        self.declare_parameter("target_cells", 120)
+        self.declare_parameter("voxel_hysteresis", 0.25)
+        # percentile trimmed off EACH end when measuring map extent (outlier guard)
+        self.declare_parameter("extent_pct", 2.0)
         self.declare_parameter("frame_id", "vggt_map")
         self.voxel = float(self.get_parameter("voxel_size").value)
         self.max_points = int(self.get_parameter("max_points").value)
         self.normal_radius = int(self.get_parameter("normal_radius").value)
         self.max_occ_nbrs = int(self.get_parameter("max_occ_nbrs").value)
         self.max_frontier = int(self.get_parameter("max_frontier").value)
+        self.adaptive_voxel = bool(self.get_parameter("adaptive_voxel").value)
+        self.target_cells = int(self.get_parameter("target_cells").value)
+        self.voxel_hysteresis = float(self.get_parameter("voxel_hysteresis").value)
+        self.extent_pct = float(self.get_parameter("extent_pct").value)
         self.frame = self.get_parameter("frame_id").value
 
         self.points = np.empty((0, 3), np.float32)
@@ -58,17 +70,58 @@ class Mapping(Node):
         self.pub_frontier = self.create_publisher(PointCloud2, "/circe/frontiers", 1)
         self.pub_surfels = self.create_publisher(PointCloud2, "/circe/surfels", 1)
         self.pub_viz = self.create_publisher(PointCloud2, "/circe/map_viz", 1)
+        # latched-ish: coverage/explore must share this exact grid
+        self.pub_voxel = self.create_publisher(Float64, "/circe/voxel_size", 10)
         self.create_timer(float(self.get_parameter("recompute_period").value), self._recompute)
 
     def _pose(self, m: Odometry):
         p = m.pose.pose.position
         self.rover_pos = np.array([p.x, p.y, p.z], np.float32)
 
+    def _adapt_voxel(self, xyz: np.ndarray) -> None:
+        """Size the fog/surfel grid from the map's OWN extent.
+
+        VGGT-SLAM is monocular, so the map is RELATIVE scale (project.md §3/§5) —
+        a fixed voxel_size is not a length, it is an arbitrary fraction of
+        whatever scale this particular run happened to land on. Measured on two
+        runs with the identical 0.05 setting: 25,674 surfels on one, 183 on the
+        next (cloud extent 0.155 x 0.016 x 0.201 units = 3 x 0.3 x 4 cells).
+        A 140x density swing, so map quality was a per-run lottery and planning
+        with it was meaningless.
+
+        Deriving it from the longest axis instead makes the grid resolution
+        scale-invariant: target_cells across the map, whatever the units are.
+        Published on /circe/voxel_size so coverage and explore use the SAME grid
+        (both key surfel state / the footprint gate off it).
+        """
+        if not self.adaptive_voxel or len(xyz) == 0:
+            return
+        # Percentile extent, NOT min/max: VGGT clouds carry occasional far-flung
+        # outliers, and absolute min/max lets a single stray point set the grid for
+        # the whole map. Seen live: one outlier stretched the span to ~7.5e3 units,
+        # so voxel became 62.7 and the entire real map collapsed into ~1 cell
+        # (60 surfels, every adequacy view then "behind camera"/out of frame).
+        lo = np.percentile(xyz, self.extent_pct, axis=0)
+        hi = np.percentile(xyz, 100.0 - self.extent_pct, axis=0)
+        span = float(np.max(hi - lo))
+        if span <= 1e-9:
+            return
+        v = span / max(self.target_cells, 1)
+        # Only react to real changes: rewriting the grid every cloud would
+        # re-bucket the whole map constantly for no benefit.
+        if self.voxel <= 0 or abs(v - self.voxel) / self.voxel > self.voxel_hysteresis:
+            self.voxel = v
+            self.pub_voxel.publish(Float64(data=float(v)))
+            self.get_logger().info(
+                f"[map] voxel -> {v:.5f} (map span {span:.3f} rel-units / "
+                f"{self.target_cells} cells)")
+
     def _cloud(self, msg: PointCloud2):
         xyz = read_points(msg, ("x", "y", "z"))
         if len(xyz) == 0:
             return
         self.points = np.vstack([self.points, xyz]).astype(np.float32)
+        self._adapt_voxel(self.points)
         # keep bounded + deduped on the fog grid
         self.points, _ = voxel_downsample(self.points, self.voxel)
         if len(self.points) > self.max_points:

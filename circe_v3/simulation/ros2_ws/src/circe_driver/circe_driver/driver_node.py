@@ -22,7 +22,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, PointCloud2
 from geometry_msgs.msg import Twist, Pose, PoseArray
 from std_msgs.msg import String, Bool, Header
 
@@ -46,6 +46,9 @@ class Driver(Node):
         # stuck detection: commanding motion this long with no pose change => wedged
         p("stuck_secs", 6.0); p("unstick_secs", 1.5)
         p("stuck_pos_eps", 0.01); p("stuck_yaw_eps", 0.02)
+        # cold-start bootstrap arc, until the map has anything to plan against
+        p("boot_lin", 0.18); p("boot_ang", 0.25)
+        p("boot_ang_blocked", 0.6)   # turn-in-place rate when nose-to-wall
         g = self.get_parameter
         self.kp_ang, self.kp_lin = g("kp_ang").value, g("kp_lin").value
         self.max_ang, self.max_lin = g("max_ang").value, g("max_lin").value
@@ -69,11 +72,17 @@ class Driver(Node):
         self.stuck_since = None          # when we first saw no progress
         self.last_progress = None        # (xy, yaw) at the last real movement
         self.unstick_until = 0.0         # reverse out of the wedge until this time
+        self.boot_lin = float(g("boot_lin").value)
+        self.boot_ang = float(g("boot_ang").value)
+        self.boot_ang_blocked = float(g("boot_ang_blocked").value)
+        self.map_seen = False            # latched by /circe/surfels; ends BOOTSTRAP
 
         self.create_subscription(Odometry, "/circe/pose_fused", self._pose, 10)
         self.create_subscription(Odometry, "/circe/goal_station", self._goal, 10)
         self.create_subscription(LaserScan, "/rover/tof", self._tof, 10)
         self.create_subscription(Bool, "/circe/done", self._done, 1)
+        # only needed to know when the map is non-empty, so BOOTSTRAP can end
+        self.create_subscription(PointCloud2, "/circe/surfels", self._surfels, 1)
         self.pub_cmd = self.create_publisher(Twist, "/rover/cmd_vel", 10)
         self.pub_views = self.create_publisher(PoseArray, "/circe/capture_views", 10)
         self.pub_state = self.create_publisher(String, "/circe/state", 10)
@@ -95,6 +104,17 @@ class Driver(Node):
         r = [x for x in m.ranges if not math.isinf(x) and not math.isnan(x) and x > m.range_min]
         self.tof_clear = min(r) if r else math.inf
 
+    def _surfels(self, m):
+        if not self.map_seen and m.width * m.height > 0:
+            self.map_seen = True
+            if self.state == "BOOTSTRAP":
+                # none of _tick's branches match (no goal yet, map_seen now True),
+                # so nothing would reassign this and /circe/state would keep
+                # publishing BOOTSTRAP while the rover sat still waiting on explore.
+                self.state = "IDLE"
+            self.get_logger().info("[driver] first map data — bootstrap complete, "
+                                   "handing over to explore")
+
     def _done(self, m):
         self.done = m.data
 
@@ -109,6 +129,29 @@ class Driver(Node):
 
         if self.done:
             self.state = "DONE"
+        elif self.goal is None and not self.map_seen:
+            # BOOTSTRAP. Cold start is a closed loop with no entry point: the map
+            # is empty, so circe_explore has no gap or frontier to plan toward, so
+            # no goal_station is published, so the rover never moves — and because
+            # VGGT-SLAM gates keyframes on optical-flow disparity, a stationary
+            # camera produces no keyframes, so the map stays empty. Every run so
+            # far had to be hand-nudged over cmd_vel to break it.
+            # Drive a bounded arc until the first map data arrives; explore takes
+            # over the moment it can plan (map_seen latches on /circe/surfels).
+            self.state = "BOOTSTRAP"
+            if blocked:
+                # Nose-to-wall. This branch used to be gated on `not blocked`, so a
+                # blocked bootstrap matched NO branch at all, cmd stayed zero, and
+                # the rover sat against the wall forever: camera view frozen =>
+                # zero optical-flow disparity => VGGT accepted 1 keyframe in 4.3
+                # hours out of 278k frames => no map => never left BOOTSTRAP.
+                # ToF only forbids FORWARD motion, so turn in place instead — which
+                # both frees the rover and generates the parallax SLAM needs.
+                cmd.linear.x = 0.0
+                cmd.angular.z = self.boot_ang_blocked
+            else:
+                cmd.linear.x = self.boot_lin
+                cmd.angular.z = self.boot_ang
         elif self.goal is not None and self.state != "RING":
             xy, yaw = self.pose
             gxy, gyaw = self.goal
@@ -169,6 +212,15 @@ class Driver(Node):
         # zero velocity means the rover cannot back away from whatever it is
         # nose-to, so the ToF stays blocked and the mission stalls forever.
         # Observed live: state DRIVE, cmd_vel all zeros, pose frozen indefinitely.
+        # BOOTSTRAP is exempt: /circe/pose_fused cannot translate until
+        # circe_localization has a scale (it only integrates translation once
+        # /circe/scale exists), so pre-scale the pose reads as frozen and this
+        # guard fired 6s into every cold start, cancelling the very manoeuvre
+        # that produces the motion the scale is estimated from.
+        if self.state == "BOOTSTRAP":
+            self.stuck_since = None
+            self.last_progress = None
+            return cmd
         stalled_on_tof = blocked and self.goal is not None and self.state != "IDLE"
         commanding = (abs(cmd.linear.x) > 1e-3 or abs(cmd.angular.z) > 1e-3
                       or stalled_on_tof)

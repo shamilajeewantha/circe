@@ -32,6 +32,11 @@ from sensor_msgs.msg import Image, PointCloud2, PointField
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Header
 
+# Camera optical axes expressed in the rover BASE frame. MUST stay identical to
+# circe_driver.R_MOUNT — that node builds capture views as R_opt = R_base @ R_MOUNT,
+# and _cam_T_to_base_T below is its exact inverse.
+R_MOUNT = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], np.float64)
+
 try:
     from cv_bridge import CvBridge
     import cv2
@@ -48,10 +53,15 @@ class VggtClient(Node):
         self.declare_parameter("voxel", 0.0)               # server-side cloud dedupe
         self.declare_parameter("max_points", 400000)
         self.declare_parameter("frame_id", "vggt_map")
+        # camera mount offset in the base frame; MUST match the URDF + circe_driver
+        self.declare_parameter("cam_forward", 0.18)
+        self.declare_parameter("cam_height", 0.18)
 
         self.url = self.get_parameter("slam_url").value.rstrip("/")
         self.quality = int(self.get_parameter("jpeg_quality").value)
         self.frame_id = self.get_parameter("frame_id").value
+        self.cam_fwd = float(self.get_parameter("cam_forward").value)
+        self.cam_h = float(self.get_parameter("cam_height").value)
         self.bridge = CvBridge() if CvBridge else None
 
         # last map marker we've consumed, for delta requests
@@ -170,8 +180,36 @@ class VggtClient(Node):
         if cloud.get("n", 0) > 0:
             self.pub_cloud.publish(self._cloud_from_b64(cloud, stamp))
 
+    def _cam_T_to_base_T(self, T_cam: np.ndarray) -> np.ndarray:
+        """Camera-optical pose -> rover base pose (inverse of circe_driver's mount).
+
+        R_opt = R_base @ R_MOUNT      =>  R_base = R_opt @ R_MOUNT^T
+        c     = base + R_base @ off   =>  base   = c - R_base @ off
+        The offset is in RELATIVE-SCALE map units like everything else here, so it
+        is only meaningful once §5 self-calibration has a scale; the rotation half
+        is what actually matters for heading control and is scale-free.
+        """
+        R_base = T_cam[:3, :3] @ R_MOUNT.T
+        off = np.array([self.cam_fwd, 0.0, self.cam_h], float)
+        T = np.eye(4)
+        T[:3, :3] = R_base
+        T[:3, 3] = T_cam[:3, 3] - R_base @ off
+        return T
+
     # --- ROS message builders -------------------------------------------
     def _odom_from_T(self, T: np.ndarray, stamp) -> Odometry:
+        # VGGT returns the CAMERA OPTICAL pose (x right, y down, z forward). This
+        # topic is child_frame_id="rover" and every consumer treats it as the rover
+        # BASE pose (x forward, y left, z up) — circe_localization hard-resets its
+        # fused pose straight to it. Publishing the optical pose unconverted meant
+        # the y-down flip negated yaw: measured with a commanded +0.5 rad/s CCW
+        # turn, the IMU read +0.224 rad/s (correct) while /circe/pose_fused ran at
+        # -0.211 rad/s. ROTATE_TO_YAW therefore drove the error the wrong way and
+        # the rover span 2.6 full turns without ever converging (final error -176
+        # degrees against a 0.05 rad tolerance), so no station ever completed and
+        # no 8-shot ring ever fired.
+        # circe_driver builds views as R_opt = R_base @ R_MOUNT; invert that here.
+        T = self._cam_T_to_base_T(T)
         od = Odometry()
         od.header = Header(stamp=stamp, frame_id=self.frame_id)
         od.child_frame_id = "rover"

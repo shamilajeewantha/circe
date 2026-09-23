@@ -82,7 +82,7 @@ real. On the real robot the SLAM box is native Linux on the LAN (no WSL networki
 |---|---|---|
 | Feed-forward RGB SLAM | **VGGT-SLAM 2.0** | arXiv [2601.19887](https://arxiv.org/abs/2601.19887); RSS 2026 [paper 51](https://roboticsconference.org/program/papers/51/); [MIT-SPARK/VGGT-SLAM](https://github.com/MIT-SPARK/VGGT-SLAM). Monocular → **relative scale** (§5 self-cal required). Real-time code released (`main_realtime.py`, pluggable `Camera` backends). |
 | Sim stack | **Gazebo Harmonic + ROS 2 Jazzy** + `ros_gz` | Official Jazzy pairing; matches repo's `gazebo/`. |
-| Indoor world | **[SIM-BOX: your choice]** — TurtleBot4 `depot.sdf` is one evidence-backed candidate | [turtlebot4_simulator](https://github.com/turtlebot/turtlebot4_simulator) has occlusion pockets good for frontier testing. Not mandated — pick whatever actually runs on your install; see §8 for selection criteria. Other candidates: `warehouse.sdf`, `maze.sdf`, any Gazebo Harmonic-compatible indoor SDF. |
+| Indoor world | **RESOLVED: `circe_sim_gazebo/worlds/maze_sensors.sdf`** (fork of TurtleBot4 `maze.sdf`). **NOT depot** — see §6B.2 | [turtlebot4_simulator](https://github.com/turtlebot/turtlebot4_simulator) has occlusion pockets good for frontier testing. Not mandated — pick whatever actually runs on your install; see §8 for selection criteria. Other candidates: `warehouse.sdf`, `maze.sdf`, any Gazebo Harmonic-compatible indoor SDF. |
 | Fog voxel occupancy | **OctoMap**-style or in-node grid | Standard, §7A.1. |
 | Coverage-aware NBV (two-layer) | **Custom** per §7A | Existing planners ([ethz-asl/nbvplanner](https://github.com/ethz-asl/nbvplanner)) are ROS 1, no two-layer surfel formulation. |
 | Map/decision viewer | **Gradio**, reusing the repo's `gradio_demo.py::_export_glb` | frustums, OpenCV→glTF axis flip, voxel/max_points. |
@@ -220,6 +220,130 @@ Gradio app (rclpy node) on the sim laptop showing **the map the robot has AND it
 - Launch: `python -m circe_viz.app --port 7860` or via `circe_bringup`; SSH-tunnel like `controller/`.
 
 ---
+
+## 6B. Sim pitfalls — things that cost real debugging time (2026-09-22)
+
+Every item below silently produced *plausible-looking but wrong* behaviour. Check these
+first when the loop "runs" but nothing converges.
+
+### 6B.1 `/rover/odom` is wheel-derived and LIES when the rover is blocked
+`gz-sim-diff-drive-system` integrates odometry from **commanded wheel rotation**, with no
+notion of slip. A rover pinned against a wall with its wheels spinning reports phantom
+forward motion forever. Measured, same instant:
+
+| source | x |
+|---|---|
+| ground truth (`gz model -m circe_rover -p`) | **2.82 m** (pinned on `wall22`, x 3.0–4.0; rover front = 2.82+0.18 = 3.00) |
+| `/rover/odom` | **44.61 m** |
+
+**Never use `/rover/odom` to judge whether the rover moved** — use `gz model -m circe_rover -p`
+for ground truth. Several conclusions in this project were initially wrong because of this
+(including "the rover is outside the building"). Note the same trap exists in
+`circe_localization`: `_imu()` integrates **commanded** velocity × scale, so `/circe/pose_fused`
+also drifts while blocked, until the next VGGT hard-reset corrects it. `circe_driver`'s
+stuck-detector therefore sees *some* phantom progress — its `stuck_pos_eps` must stay well
+above that drift or the detector will never fire.
+
+### 6B.2 A world can have walls you can SEE but not COLLIDE with
+`depot.sdf` pulls the Fuel `Depot` model, which has **16 `<visual>` elements and exactly 1
+`<collision>` — and that collision is just a 100×100 m ground plane.** No wall or crate
+collision geometry whatsoever. The rover drives straight through the building.
+
+Symptoms this produces, none of which point at the world: map extent grows without bound,
+surfels stay sparse (~150), `covered` stays 0 forever (the 8-shot rings fire in open air with
+no surface in range), and the ToF behaves bizarrely — `gpu_lidar` raycasts the **render**
+scene, so it *sees* walls that physics lets the rover pass through.
+
+**Check the collision GEOMETRY TYPE, not the count** (an earlier version of this
+guide said "collisions must be >> 1" — that is WRONG and would reject the warehouse,
+which is correct with a single whole-building mesh collision):
+```bash
+sed -n '/<collision/,/<\/collision>/p' model.sdf | head -12
+```
+`<mesh>` or per-wall `<box>` = solid. A lone `<plane>` = bare floor, walls are ghosts.
+
+**Collisions are only half the test.** A geometrically perfect world can still be
+useless for SLAM — see §6B.7 and, for the full checklist and the record of every world
+already rejected, **`MAP_SELECTION.md`** (read it before changing the world).
+
+### 6B.3 Stock turtlebot4 worlds ship their sensor plugins DISABLED
+Both `depot.sdf` and `maze.sdf` ship with the `Sensors` system **commented out**, and neither
+has the `Imu` system at all. Without them, camera / `gpu_lidar` / IMU sensors defined on a
+spawned model **advertise their gz topics but never publish a single message** — so the
+bridge looks healthy and the ROS topics exist but are silent. Both forks in
+`circe_sim_gazebo/worlds/` enable:
+```xml
+<plugin name="gz::sim::systems::Sensors" filename="gz-sim-sensors-system">
+    <render_engine>ogre2</render_engine>
+</plugin>
+<plugin name="gz::sim::systems::Imu" filename="gz-sim-imu-system" />
+```
+
+### 6B.4 `<static>` is only valid under `<model>`, not `<link>`
+`maze.sdf` puts `<static>true</static>` inside each `<link>`. Gazebo warns
+(`XML Element[static], child of element[link], not defined in SDF`) and ignores it. It happens
+to be harmless there because each **model** also declares `<static>`, but the warning is a
+red herring that looks exactly like a "walls aren't solid" cause. Confirm at the *model*
+level before chasing it.
+
+### 6B.5 `voxel_size` is in RELATIVE-SCALE units, not metres
+VGGT-SLAM is monocular (§3/§5), so the map's units are arbitrary and differ **per run**. The
+same hardcoded `voxel_size: 0.05` produced **25,674 surfels** on one run and **183** on the
+next (cloud extent 0.155 × 0.016 × 0.201 units = 3 × 0.3 × 4 cells) — a 140× density swing.
+`circe_mapping` now derives the voxel from the map's own extent
+(`span / target_cells`) and broadcasts it on **`/circe/voxel_size`**; `circe_coverage` and
+`circe_explore` subscribe and follow, because both key state off that grid (coverage re-keys
+its persistent `covered`/`q_best` rather than dropping it). **Anything that consumes the voxel
+must subscribe, never hardcode** — `circe_explore`'s footprint gate was hardcoded to 0.05 and
+silently disagreed with the adequacy test coverage actually applied.
+
+### 6B.6 Python does not hot-reload — version the long-running server
+Editing `slam_host/slam_server.py` does nothing to an already-running server. A fix was
+"applied" while the live process kept executing the old path, and it was only caught by
+watching the old bug still happen. `/status` now reports `version`, `src_sha` (hash of the
+file **as loaded at startup**), `src_sha_on_disk`, and **`stale`** — computing the hash at
+request time instead would just re-read the current file and could never reveal a stale
+process. `stale: true` means restart required.
+
+### 6B.7 A world can be geometrically perfect and still destroy SLAM
+`maze.sdf` had 41 visuals / 41 matching box collisions — solid walls, no Fuel
+downloads. It still had to be abandoned: **42 materials but only 3 distinct colours**,
+walls at `diffuse 0 0.01 0.05` (near-black, camera mean pixel 25.5/255). VGGT accepted
+**1 keyframe in 4.3 hours out of 278,000 frames**, reported **19 "loop closures" in a
+20x20 m maze** (false matches — every corridor is identical, and each false loop
+re-optimises every pose), and produced an amorphous fan of points with no walls.
+
+Worse, the scalar health checks all looked GREEN: planarity 0.044, reconstruction plan
+aspect 1.09 vs a true 1.00. A blob is also planar and also square. **Always render the
+reconstructed map against ground truth** — `scratchpad/map_vs_truth.py` does exactly
+this, and it is the only thing that revealed the problem.
+
+"Has collisions" and "is a usable SLAM world" are independent properties. See
+`MAP_SELECTION.md`.
+
+## 6A. RULE: clean up before every launch (non-negotiable)
+
+```bash
+./clean_start.sh --verify      # from circe_v3/simulation/
+```
+
+Stale processes do not announce themselves — they quietly corrupt the next run, and
+every symptom points somewhere else. Real cases from this project:
+
+* Three stale `ros_gz_bridge` + `robot_state_publisher` instances (pids 5820, 41554,
+  69598) accumulated across runs, all publishing the **same** `/rover/*` topics.
+  Sensor rates collapsed and it looked like "ROS 2 crashed".
+* An orphaned brain kept streaming frames into the SLAM server, so a "fresh" run's
+  session counters were polluted by a process nobody knew was running.
+* Two `gz sim server` instances competed for the GPU; sensors silently stopped
+  publishing while every node still looked healthy.
+* A `pkill -f "circe_"` matched the invoking shell itself (the cwd contains `circe_`)
+  and killed the launch script mid-run — match on the executable path
+  (`lib/circe_<pkg>/<node>`), never on a bare project substring.
+
+The script also restarts the ROS 2 daemon, because it caches the topic graph and will
+serve a stale one after publishers die — which makes `ros2 topic hz` report phantom or
+missing topics.
 
 ## 7. Verification
 

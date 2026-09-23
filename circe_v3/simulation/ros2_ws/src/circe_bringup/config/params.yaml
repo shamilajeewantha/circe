@@ -23,22 +23,31 @@
 
 /circe_mapping:
   ros__parameters:
-    # 0.05 was unrunnable on the depot world: it produced 400k+ occupied voxels
-    # (hitting max_points) and 1,077,860 frontier cells, and _recompute measured
-    # ~70s against this 1.0s timer — coverage and explore went a minute at a time
-    # without fresh data. Voxel count scales ~1/v^3, so 0.10 cuts it ~8x.
-    # MUST match /circe_coverage's voxel_size (it keys surfel state by this grid).
-    voxel_size: 0.10
-    max_points: 200000
+    # voxel_size is in RELATIVE-SCALE map units, NOT metres — VGGT-SLAM is
+    # monocular (project.md §3/§5). A run's cloud measured only 0.217 x 0.042 x
+    # 0.102 units across, so raising this to 0.10 collapsed the whole map into
+    # ~2x0.4x1 cells (84 cloud pts -> 338 surfels) and left nothing to plan
+    # against. The ~70s recompute that motivated raising it was fixed properly
+    # instead, by vectorising the frontier scan and the normal PCA.
+    # MUST match /circe_coverage + /circe_explore voxel_size.
+    voxel_size: 0.05
+    max_points: 400000
     recompute_period: 1.0
     normal_radius: 1          # PCA neighbourhood = 3x3x3 voxels (0.30 m here)
     max_occ_nbrs: 2
     max_frontier: 60000
+    # RELATIVE-SCALE SAFE grid: voxel is derived from the map's own extent
+    # (span/target_cells) and broadcast on /circe/voxel_size, because a fixed
+    # voxel is meaningless when VGGT's scale is arbitrary per run.
+    adaptive_voxel: true
+    target_cells: 60        # 120 gave ~140k surfels; mapping/coverage hit ~97% CPU
+    voxel_hysteresis: 0.25
+    extent_pct: 2.0        # trim outliers when measuring map extent
     frame_id: "vggt_map"
 
 /circe_coverage:
   ros__parameters:
-    voxel_size: 0.10    # MUST match /circe_mapping's voxel_size (keys surfel state)
+    voxel_size: 0.05    # MUST match /circe_mapping's voxel_size (keys surfel state)
     fx: 1055.0
     fy: 1055.0
     cx: 640.0
@@ -66,6 +75,7 @@
     period: 2.0
     # gap clusters scored per tick; _adequate_count is O(#surfels) per candidate
     max_clusters: 40
+    voxel_size: 0.05    # MUST match /circe_mapping (footprint gate uses it)
     frame_id: "vggt_map"
 
 /circe_driver:
@@ -81,4 +91,12 @@
     cam_height: 0.18
     ring_steps: 8
     settle_ticks: 10
+    # cold-start: arc until the first surfels exist, then explore takes over
+    boot_lin: 0.18
+    boot_ang: 0.25
+    boot_ang_blocked: 0.6   # turn in place when ToF-blocked during bootstrap
+    stuck_secs: 6.0
+    unstick_secs: 1.5
+    stuck_pos_eps: 0.01
+    stuck_yaw_eps: 0.02
     frame_id: "vggt_map"

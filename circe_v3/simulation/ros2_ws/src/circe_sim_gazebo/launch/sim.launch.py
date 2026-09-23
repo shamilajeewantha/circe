@@ -22,6 +22,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.actions import SetEnvironmentVariable
 from launch_ros.actions import Node
 import xacro
 
@@ -57,7 +58,13 @@ def generate_launch_description() -> LaunchDescription:
         output="screen", parameters=[{"robot_description": robot_desc}],
     )
 
+    # so <albedo_map>textures/...</albedo_map> in the world resolves
+    res_path = SetEnvironmentVariable(
+        "GZ_SIM_RESOURCE_PATH",
+        os.path.join(sim_pkg, "worlds") + ":" + os.environ.get("GZ_SIM_RESOURCE_PATH", ""))
+
     return LaunchDescription([
+        res_path,
         DeclareLaunchArgument("world", description="Path to an indoor world SDF [SIM-BOX: your choice — see this file's docstring]"),
         gz, spawn, bridge, rsp,
     ])
